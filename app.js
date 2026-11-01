@@ -139,7 +139,16 @@ function initCloudMqtt() {
 
     state.mqttClient.on('message', (topic, payload) => {
       try {
-        const msg = JSON.parse(payload.toString());
+        let textPayload = '';
+        if (typeof payload === 'string') {
+          textPayload = payload;
+        } else if (window.TextDecoder) {
+          textPayload = new TextDecoder('utf-8').decode(payload);
+        } else {
+          textPayload = payload.toString();
+        }
+
+        const msg = JSON.parse(textPayload);
         const myId = state.myProfile ? state.myProfile.id : null;
 
         if (topic.endsWith('/loc')) {
@@ -150,9 +159,12 @@ function initCloudMqtt() {
             refreshCloudConvoy();
           }
         } else if (topic.endsWith('/voice')) {
+          console.log('[MQTT Voice] Received voice from:', msg.senderName, 'senderId:', msg.senderId, 'myId:', myId);
           // Received live walkie-talkie audio from another rider
-          if (msg && msg.audio && msg.senderId !== myId) {
-            playIncomingVoice(msg.senderName, msg.audio);
+          if (msg && msg.audio) {
+            if (msg.senderId !== myId) {
+              playIncomingVoice(msg.senderName || 'Rider', msg.audio);
+            }
           }
         } else if (topic.endsWith('/ctl')) {
           // Received control command from Master
@@ -1591,12 +1603,12 @@ function initEventListeners() {
 
     const ctx = getSharedAudioContext();
     const inputSampleRate = (ctx && ctx.sampleRate) ? ctx.sampleRate : 44100;
-    const targetSampleRate = 16000;
+    const targetSampleRate = 12000; // 12kHz: jernih, ultra-ringan (~24KB/dtk), lolos limit MQTT
 
     let totalLength = 0;
     for (let i = 0; i < chunksToProcess.length; i++) totalLength += chunksToProcess[i].length;
-    // Discard tiny noise clicks (<100ms)
-    if (totalLength < inputSampleRate * 0.1) return;
+    // Discard tiny noise clicks (<80ms)
+    if (totalLength < inputSampleRate * 0.08) return;
 
     const merged = new Float32Array(totalLength);
     let offset = 0;
@@ -1624,7 +1636,7 @@ function initEventListeners() {
 
     setTimeout(() => {
       flushPcmChunksAndBroadcast(() => {
-        showPttToast('✅ Terkirim!', 1500);
+        showPttToast('✅ Terkirim ke Rombongan!', 1800);
       });
 
       if (pttProcessor) {
@@ -1639,7 +1651,10 @@ function initEventListeners() {
   }
 
   function broadcastVoice(audioDataUrl) {
-    if (!state.mqttClient || !state.mqttClient.connected || state.isMutedByHost) return;
+    if (!state.mqttClient || !state.mqttClient.connected || state.isMutedByHost) {
+      console.warn('Cannot broadcast voice: MQTT not connected or muted');
+      return;
+    }
     const cleanRoom = (state.roomCode || 'TOURING-1').replace(/[^A-Z0-9_-]/gi, '');
     const topicVoice = `touringmate/rooms/${cleanRoom}/voice`;
 
@@ -1650,7 +1665,15 @@ function initEventListeners() {
       timestamp: Date.now()
     };
 
-    state.mqttClient.publish(topicVoice, JSON.stringify(payload));
+    console.log('[Voice] Broadcasting to', topicVoice, 'data length:', audioDataUrl.length);
+    state.mqttClient.publish(topicVoice, JSON.stringify(payload), { qos: 0 }, (err) => {
+      if (err) {
+        console.error('[Voice] Publish error:', err);
+        showPttToast('⚠️ Gagal Terkirim');
+      } else {
+        console.log('[Voice] Broadcast success!');
+      }
+    });
   }
 
   // --- INCOMING VOICE QUEUE & UNIVERSAL PLAYBACK ---
@@ -1658,6 +1681,7 @@ function initEventListeners() {
   let isVoicePlaying = false;
 
   function playIncomingVoice(speakerName, audioDataUrl) {
+    console.log('[Voice] Queuing incoming transmission from:', speakerName);
     incomingVoiceQueue.push({ speakerName, audioDataUrl });
     if (!isVoicePlaying) {
       processIncomingVoiceQueue();
@@ -1676,6 +1700,12 @@ function initEventListeners() {
     const item = incomingVoiceQueue.shift();
     const ctx = getSharedAudioContext();
 
+    // Show toast immediately so receiver sees who is talking
+    const toast = document.getElementById('incomingVoiceToast');
+    const speakerEl = document.getElementById('incomingVoiceSpeaker');
+    if (speakerEl) speakerEl.textContent = `${item.speakerName} bicara...`;
+    if (toast) toast.classList.remove('hidden');
+
     try {
       if (ctx && ctx.state === 'suspended') {
         try { await ctx.resume(); } catch (e) {}
@@ -1685,32 +1715,41 @@ function initEventListeners() {
 
       const arrayBuffer = base64ToArrayBuffer(item.audioDataUrl);
 
-      ctx.decodeAudioData(arrayBuffer, (audioBuffer) => {
+      // WebKit Safari requires buffer.slice(0) copy
+      ctx.decodeAudioData(arrayBuffer.slice(0), (audioBuffer) => {
         const source = ctx.createBufferSource();
         source.buffer = audioBuffer;
         source.connect(ctx.destination);
 
-        const toast = document.getElementById('incomingVoiceToast');
-        const speakerEl = document.getElementById('incomingVoiceSpeaker');
-        if (speakerEl) speakerEl.textContent = `${item.speakerName} bicara...`;
-        if (toast) toast.classList.remove('hidden');
-
         source.onended = () => {
-          setTimeout(processIncomingVoiceQueue, 100);
+          if (incomingVoiceQueue.length === 0 && toast) {
+            toast.classList.add('hidden');
+          }
+          setTimeout(processIncomingVoiceQueue, 80);
         };
 
         source.start(0);
       }, (err) => {
         console.warn('decodeAudioData error, attempting fallback:', err);
         const fallbackAudio = new Audio(item.audioDataUrl);
-        fallbackAudio.onended = () => setTimeout(processIncomingVoiceQueue, 100);
-        fallbackAudio.onerror = () => setTimeout(processIncomingVoiceQueue, 100);
-        fallbackAudio.play().catch(() => setTimeout(processIncomingVoiceQueue, 100));
+        fallbackAudio.onended = () => {
+          if (incomingVoiceQueue.length === 0 && toast) toast.classList.add('hidden');
+          setTimeout(processIncomingVoiceQueue, 80);
+        };
+        fallbackAudio.onerror = () => {
+          if (incomingVoiceQueue.length === 0 && toast) toast.classList.add('hidden');
+          setTimeout(processIncomingVoiceQueue, 80);
+        };
+        fallbackAudio.play().catch(() => {
+          if (incomingVoiceQueue.length === 0 && toast) toast.classList.add('hidden');
+          setTimeout(processIncomingVoiceQueue, 80);
+        });
       });
 
     } catch (err) {
       console.warn('Voice play queue error:', err);
-      setTimeout(processIncomingVoiceQueue, 100);
+      if (incomingVoiceQueue.length === 0 && toast) toast.classList.add('hidden');
+      setTimeout(processIncomingVoiceQueue, 80);
     }
   }
 
@@ -1758,8 +1797,8 @@ function initEventListeners() {
                   merged.set(chunks[i], offset);
                   offset += chunks[i].length;
                 }
-                const downsampled = downsampleBuffer(merged, inputSampleRate, 16000);
-                const wavBlob = encodeWAV(downsampled, 16000);
+                const downsampled = downsampleBuffer(merged, inputSampleRate, 12000);
+                const wavBlob = encodeWAV(downsampled, 12000);
                 const reader = new FileReader();
                 reader.onloadend = () => {
                   playIncomingVoice('Tes Suara Anda Sendiri', reader.result);
@@ -1803,75 +1842,71 @@ function initEventListeners() {
     updatePttButtonUI();
   }
 
-  // PTT Button Event Listeners: Supports both Tap to toggle & Hold to talk
+  // PTT Button Event Listeners: Instant Push-to-Talk + Tap-to-Lock
   const pttButton = document.getElementById('btnPtt');
-  let holdTimeout = null;
-  let isHoldActive = false;
+  let pttStartTime = 0;
+  let pttIsLocked = false;
+
+  function handlePttStart(e) {
+    if (e) e.preventDefault();
+    unlockGlobalAudio();
+    if (state.isMutedByHost) return;
+
+    if (state.micMode === 'ALWAYS_ON') {
+      if (isRecordingPtt) stopPttRecording(); else startPttRecording();
+      return;
+    }
+
+    if (isRecordingPtt && pttIsLocked) {
+      // User tapped while locked -> stop recording & send
+      pttIsLocked = false;
+      stopPttRecording();
+      return;
+    }
+
+    pttStartTime = Date.now();
+    startPttRecording();
+  }
+
+  function handlePttEnd(e) {
+    if (e) e.preventDefault();
+    if (state.isMutedByHost || state.micMode === 'ALWAYS_ON') return;
+
+    const duration = Date.now() - pttStartTime;
+    // Quick tap (< 350ms): lock mic on so rider can talk hands-free
+    if (duration < 350 && isRecordingPtt && !pttIsLocked) {
+      pttIsLocked = true;
+      showPttToast('🔒 Mic Nyala (Ketuk lagi untuk kirim)', 3000);
+      return;
+    }
+
+    pttIsLocked = false;
+    stopPttRecording();
+  }
 
   if (pttButton) {
     // Touch (Mobile iOS & Android)
-    pttButton.addEventListener('touchstart', (e) => {
-      e.preventDefault();
-      unlockGlobalAudio();
-      if (state.isMutedByHost) return;
-      if (state.micMode === 'ALWAYS_ON') {
-        if (isRecordingPtt) stopPttRecording(); else startPttRecording();
-        return;
-      }
-      isHoldActive = false;
-      holdTimeout = setTimeout(() => {
-        isHoldActive = true;
-        startPttRecording();
-      }, 250);
-    }, { passive: false });
-
-    pttButton.addEventListener('touchend', (e) => {
-      e.preventDefault();
-      clearTimeout(holdTimeout);
-      if (state.isMutedByHost || state.micMode === 'ALWAYS_ON') return;
-      if (isHoldActive) {
-        stopPttRecording();
-      } else {
-        // Single tap toggle
-        if (isRecordingPtt) stopPttRecording(); else startPttRecording();
-      }
-      isHoldActive = false;
-    }, { passive: false });
+    pttButton.addEventListener('touchstart', handlePttStart, { passive: false });
+    pttButton.addEventListener('touchend', handlePttEnd, { passive: false });
 
     // Click/Mouse (Desktop)
-    pttButton.addEventListener('mousedown', (e) => {
-      e.preventDefault();
-      unlockGlobalAudio();
-      if (state.isMutedByHost) return;
-      if (state.micMode === 'ALWAYS_ON') {
-        if (isRecordingPtt) stopPttRecording(); else startPttRecording();
-        return;
-      }
-      isHoldActive = false;
-      holdTimeout = setTimeout(() => {
-        isHoldActive = true;
-        startPttRecording();
-      }, 250);
-    });
-
-    pttButton.addEventListener('mouseup', (e) => {
-      e.preventDefault();
-      clearTimeout(holdTimeout);
-      if (state.isMutedByHost || state.micMode === 'ALWAYS_ON') return;
-      if (isHoldActive) {
-        stopPttRecording();
-      } else {
-        if (isRecordingPtt) stopPttRecording(); else startPttRecording();
-      }
-      isHoldActive = false;
-    });
+    pttButton.addEventListener('mousedown', handlePttStart);
+    pttButton.addEventListener('mouseup', handlePttEnd);
 
     pttButton.addEventListener('mouseleave', () => {
-      clearTimeout(holdTimeout);
-      if (isHoldActive) stopPttRecording();
-      isHoldActive = false;
+      if (isRecordingPtt && !pttIsLocked) {
+        stopPttRecording();
+      }
     });
   }
+
+  // Pre-warm mic stream on first user touch anywhere
+  window.addEventListener('touchstart', () => {
+    if (!persistentMicStream) getMicStream().catch(() => {});
+  }, { once: true, passive: true });
+  window.addEventListener('click', () => {
+    if (!persistentMicStream) getMicStream().catch(() => {});
+  }, { once: true, passive: true });
 
   // Host Mute Roster Events
   document.getElementById('riderListContainer').addEventListener('click', (e) => {
