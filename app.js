@@ -26,7 +26,9 @@ const state = {
   tesseractWorker: null,
   micMode: 'PTT', // 'PTT' | 'ALWAYS_ON' | 'VOX'
   voxThreshold: -35, // dB
-  isMutedByHost: false
+  isMutedByHost: false,
+  chatHistory: [],
+  unreadChatCount: 0
 };
 
 // Preset Convoy Members (Dummies initialized by Master if needed)
@@ -114,6 +116,7 @@ function initCloudMqtt() {
   const topicLocation = `touringmate/rooms/${cleanRoom}/loc`;
   const topicControl = `touringmate/rooms/${cleanRoom}/ctl`;
   const topicVoice = `touringmate/rooms/${cleanRoom}/voice`;
+  const topicChat = `touringmate/rooms/${cleanRoom}/chat`;
 
   try {
     const clientId = 'tm-' + Date.now() + '-' + Math.random().toString(36).substring(2, 9);
@@ -127,7 +130,7 @@ function initCloudMqtt() {
 
     state.mqttClient.on('connect', () => {
       console.log('Connected to Cloud Realtime MQTT!');
-      state.mqttClient.subscribe([topicLocation, topicControl, topicVoice], () => {
+      state.mqttClient.subscribe([topicLocation, topicControl, topicVoice, topicChat], () => {
         const syncInd = document.getElementById('serverSyncIndicator');
         if (syncInd) {
           syncInd.innerHTML = `<span class="w-1.5 h-1.5 rounded-full bg-emerald-500 animate-pulse"></span> Cloud Live (${state.roomCode})`;
@@ -158,13 +161,33 @@ function initCloudMqtt() {
             state.activeCloudRiders[msg.id] = msg;
             refreshCloudConvoy();
           }
+        } else if (topic.endsWith('/chat')) {
+          // Received text chat message
+          console.log('[MQTT Chat] Received text:', msg);
+          if (msg && msg.text && msg.senderId !== myId) {
+            appendChatMessage({
+              id: 'chat-' + Date.now(),
+              type: 'chat_in',
+              senderName: msg.senderName || 'Rider',
+              text: msg.text,
+              time: new Date().toLocaleTimeString('id-ID', { hour: '2-digit', minute: '2-digit', second: '2-digit' })
+            });
+            showIncomingTextToast(msg.senderName || 'Rider', msg.text);
+          }
         } else if (topic.endsWith('/voice')) {
           console.log('[MQTT Voice] Received voice from:', msg.senderName, 'senderId:', msg.senderId, 'myId:', myId);
           // Received live walkie-talkie audio from another rider
-          if (msg && msg.audio) {
-            if (msg.senderId !== myId) {
-              playIncomingVoice(msg.senderName || 'Rider', msg.audio);
-            }
+          if (msg && msg.audio && msg.senderId !== myId) {
+            const sizeKB = Math.round(msg.audio.length * 0.75 / 1024);
+            appendChatMessage({
+              id: 'voice-' + Date.now(),
+              type: 'voice_in',
+              senderName: msg.senderName || 'Rider',
+              sizeKB,
+              audio: msg.audio,
+              time: new Date().toLocaleTimeString('id-ID', { hour: '2-digit', minute: '2-digit', second: '2-digit' })
+            });
+            playIncomingVoice(msg.senderName || 'Rider', msg.audio);
           }
         } else if (topic.endsWith('/ctl')) {
           // Received control command from Master
@@ -209,14 +232,14 @@ function switchCloudRoom(newRoomCode) {
   const cleanOld = (state.roomCode || 'TOURING-1').replace(/[^A-Z0-9_-]/gi, '');
   const cleanNew = (newRoomCode || 'TOURING-1').replace(/[^A-Z0-9_-]/gi, '');
 
-  state.mqttClient.unsubscribe([`touringmate/rooms/${cleanOld}/loc`, `touringmate/rooms/${cleanOld}/ctl`, `touringmate/rooms/${cleanOld}/voice`]);
+  state.mqttClient.unsubscribe([`touringmate/rooms/${cleanOld}/loc`, `touringmate/rooms/${cleanOld}/ctl`, `touringmate/rooms/${cleanOld}/voice`, `touringmate/rooms/${cleanOld}/chat`]);
   state.roomCode = cleanNew;
   state.activeCloudRiders = {};
   state.riders = [];
   updateMapMarkers();
   renderRoster();
 
-  state.mqttClient.subscribe([`touringmate/rooms/${cleanNew}/loc`, `touringmate/rooms/${cleanNew}/ctl`, `touringmate/rooms/${cleanNew}/voice`], () => {
+  state.mqttClient.subscribe([`touringmate/rooms/${cleanNew}/loc`, `touringmate/rooms/${cleanNew}/ctl`, `touringmate/rooms/${cleanNew}/voice`, `touringmate/rooms/${cleanNew}/chat`], () => {
     const syncInd = document.getElementById('serverSyncIndicator');
     if (syncInd) {
       syncInd.innerHTML = `<span class="w-1.5 h-1.5 rounded-full bg-emerald-500 animate-pulse"></span> Cloud Live (${state.roomCode})`;
@@ -1658,9 +1681,23 @@ function initEventListeners() {
     const cleanRoom = (state.roomCode || 'TOURING-1').replace(/[^A-Z0-9_-]/gi, '');
     const topicVoice = `touringmate/rooms/${cleanRoom}/voice`;
 
+    const myName = state.myProfile ? state.myProfile.name : 'Saya';
+    const myId = state.myProfile ? state.myProfile.id : 'unknown';
+    const sizeKB = Math.round(audioDataUrl.length * 0.75 / 1024);
+
+    // Record to local conversation history
+    appendChatMessage({
+      id: 'voice-' + Date.now(),
+      type: 'voice_out',
+      senderName: myName,
+      sizeKB,
+      audio: audioDataUrl,
+      time: new Date().toLocaleTimeString('id-ID', { hour: '2-digit', minute: '2-digit', second: '2-digit' })
+    });
+
     const payload = {
-      senderId: state.myProfile ? state.myProfile.id : 'unknown',
-      senderName: state.myProfile ? state.myProfile.name : 'Rider',
+      senderId: myId,
+      senderName: myName,
       audio: audioDataUrl,
       timestamp: Date.now()
     };
@@ -1952,6 +1989,239 @@ function initEventListeners() {
       alert(`Semua mic peserta telah ${isAllMuted ? 'dimatikan' : 'diaktifkan kembali'}!`);
     });
   }
+
+  // ==========================================================================
+  // CONVERSATION & TRANSMISSION HISTORY FEED (CHAT & VOICE LOGS)
+  // ==========================================================================
+  function appendChatMessage(item) {
+    state.chatHistory.push(item);
+    renderChatLog();
+
+    const modal = document.getElementById('chatLogModal');
+    const isModalOpen = modal && !modal.classList.contains('hidden');
+
+    if (!isModalOpen && (item.type === 'chat_in' || item.type === 'voice_in')) {
+      state.unreadChatCount++;
+      updateUnreadBadges();
+    }
+  }
+
+  function updateUnreadBadges() {
+    const badgeTop = document.getElementById('unreadChatBadge');
+    const badgeFloat = document.getElementById('unreadChatBadgeFloating');
+    if (state.unreadChatCount > 0) {
+      if (badgeTop) {
+        badgeTop.textContent = state.unreadChatCount;
+        badgeTop.classList.remove('hidden');
+      }
+      if (badgeFloat) badgeFloat.classList.remove('hidden');
+    } else {
+      if (badgeTop) badgeTop.classList.add('hidden');
+      if (badgeFloat) badgeFloat.classList.add('hidden');
+    }
+  }
+
+  function showIncomingTextToast(senderName, text) {
+    const toast = document.getElementById('incomingTextToast');
+    const senderEl = document.getElementById('incomingTextSender');
+    const msgEl = document.getElementById('incomingTextMessage');
+    if (!toast || !senderEl || !msgEl) return;
+
+    senderEl.textContent = `Pesan dari ${senderName}`;
+    msgEl.textContent = text;
+    toast.classList.remove('hidden');
+
+    const audioEl = document.getElementById('alertAudio');
+    if (audioEl) {
+      audioEl.currentTime = 0;
+      audioEl.play().catch(() => {});
+    }
+
+    setTimeout(() => {
+      toast.classList.add('hidden');
+    }, 4500);
+  }
+
+  function renderChatLog() {
+    const feed = document.getElementById('chatLogFeed');
+    if (!feed) return;
+
+    if (state.chatHistory.length === 0) {
+      feed.innerHTML = `
+        <div class="text-center text-slate-500 text-[11px] py-4">
+          Belum ada percakapan. Mulai bicara lewat PTT atau ketik pesan teks di bawah untuk menguji koneksi antar HP!
+        </div>
+      `;
+      return;
+    }
+
+    let html = '';
+    state.chatHistory.forEach((msg, idx) => {
+      if (msg.type === 'voice_out') {
+        html += `
+          <div class="flex justify-end">
+            <div class="max-w-[85%] bg-emerald-950/70 border border-emerald-500/40 rounded-2xl rounded-tr-sm p-3 text-slate-100 shadow-md">
+              <div class="flex items-center justify-between gap-3 text-[10px] text-emerald-400 mb-1 font-mono">
+                <span class="font-bold">🎙️ Suara Saya</span>
+                <span>${msg.time} • ${msg.sizeKB} KB</span>
+              </div>
+              <div class="flex items-center gap-2 mt-2">
+                <button class="btn-play-voice-item px-2.5 py-1 bg-emerald-600 hover:bg-emerald-500 text-white rounded-lg text-[11px] font-bold flex items-center gap-1.5 transition active:scale-95" data-idx="${idx}">
+                  <i data-lucide="play" class="w-3 h-3"></i> Putar Suara
+                </button>
+                <span class="text-[10px] text-emerald-400/80 font-mono">✅ Disiarkan ke Cloud</span>
+              </div>
+            </div>
+          </div>
+        `;
+      } else if (msg.type === 'voice_in') {
+        html += `
+          <div class="flex justify-start">
+            <div class="max-w-[85%] bg-slate-800/90 border border-cyan-500/40 rounded-2xl rounded-tl-sm p-3 text-slate-100 shadow-md">
+              <div class="flex items-center justify-between gap-3 text-[10px] text-cyan-400 mb-1 font-mono">
+                <span class="font-bold">📻 ${escapeHtml(msg.senderName)}</span>
+                <span>${msg.time} • ${msg.sizeKB} KB</span>
+              </div>
+              <div class="flex items-center gap-2 mt-2">
+                <button class="btn-play-voice-item px-2.5 py-1 bg-cyan-600 hover:bg-cyan-500 text-white rounded-lg text-[11px] font-bold flex items-center gap-1.5 transition active:scale-95" data-idx="${idx}">
+                  <i data-lucide="play" class="w-3 h-3"></i> Putar Suara
+                </button>
+                <span class="text-[10px] text-cyan-300/80 font-mono">Diterima dari Cloud</span>
+              </div>
+            </div>
+          </div>
+        `;
+      } else if (msg.type === 'chat_out') {
+        html += `
+          <div class="flex justify-end">
+            <div class="max-w-[85%] bg-emerald-600 text-white rounded-2xl rounded-tr-sm px-3.5 py-2 text-xs shadow-md">
+              <div class="text-[9px] text-emerald-200 font-mono mb-0.5 text-right">${msg.time}</div>
+              <div class="font-medium">${escapeHtml(msg.text)}</div>
+            </div>
+          </div>
+        `;
+      } else if (msg.type === 'chat_in') {
+        html += `
+          <div class="flex justify-start">
+            <div class="max-w-[85%] bg-slate-800 border border-slate-700 text-slate-100 rounded-2xl rounded-tl-sm px-3.5 py-2 text-xs shadow-md">
+              <div class="text-[10px] text-amber-400 font-bold mb-0.5 flex items-center justify-between gap-2">
+                <span>${escapeHtml(msg.senderName)}</span>
+                <span class="text-[9px] text-slate-400 font-mono">${msg.time}</span>
+              </div>
+              <div class="text-slate-200 font-medium">${escapeHtml(msg.text)}</div>
+            </div>
+          </div>
+        `;
+      }
+    });
+
+    feed.innerHTML = html;
+    feed.scrollTop = feed.scrollHeight;
+    if (window.lucide) lucide.createIcons();
+  }
+
+  function escapeHtml(str) {
+    return String(str || '').replace(/[&<>"']/g, (m) => {
+      return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[m];
+    });
+  }
+
+  function broadcastTextMessage(text) {
+    if (!text || !text.trim()) return;
+    const cleanRoom = (state.roomCode || 'TOURING-1').replace(/[^A-Z0-9_-]/gi, '');
+    const topicChat = `touringmate/rooms/${cleanRoom}/chat`;
+
+    const myName = state.myProfile ? state.myProfile.name : 'Saya';
+    const myId = state.myProfile ? state.myProfile.id : 'unknown';
+
+    appendChatMessage({
+      id: 'chat-' + Date.now(),
+      type: 'chat_out',
+      senderName: myName,
+      text: text.trim(),
+      time: new Date().toLocaleTimeString('id-ID', { hour: '2-digit', minute: '2-digit', second: '2-digit' })
+    });
+
+    const payload = {
+      senderId: myId,
+      senderName: myName,
+      text: text.trim(),
+      timestamp: Date.now()
+    };
+
+    if (state.mqttClient && state.mqttClient.connected) {
+      state.mqttClient.publish(topicChat, JSON.stringify(payload));
+    }
+  }
+
+  function sendSyntheticBeep() {
+    unlockGlobalAudio();
+    const sampleRate = 12000;
+    const numSamples = Math.round(sampleRate * 0.4);
+    const samples = new Float32Array(numSamples);
+    for (let i = 0; i < numSamples; i++) {
+      const t = i / sampleRate;
+      const env = 1 - (i / numSamples);
+      samples[i] = Math.sin(2 * Math.PI * 880 * t) * 0.6 * env;
+    }
+    const wavBlob = encodeWAV(samples, sampleRate);
+    const reader = new FileReader();
+    reader.onloadend = () => {
+      broadcastVoice(reader.result);
+      showPttToast('🧪 Beep Tes Terkirim!', 2000);
+    };
+    reader.readAsDataURL(wavBlob);
+  }
+
+  // Modal Open/Close & Actions
+  const chatModal = document.getElementById('chatLogModal');
+  const chatRoomBadge = document.getElementById('chatRoomBadge');
+
+  function openChatModal() {
+    if (chatModal) {
+      chatModal.classList.remove('hidden');
+      state.unreadChatCount = 0;
+      updateUnreadBadges();
+      if (chatRoomBadge) {
+        chatRoomBadge.textContent = `Room: ${state.roomCode || 'TOURING-1'}`;
+      }
+      renderChatLog();
+    }
+  }
+
+  document.getElementById('btnOpenChatLog')?.addEventListener('click', openChatModal);
+  document.getElementById('btnOpenChatLogFloating')?.addEventListener('click', openChatModal);
+  document.getElementById('btnCloseChatLog')?.addEventListener('click', () => {
+    if (chatModal) chatModal.classList.add('hidden');
+  });
+
+  document.getElementById('chatForm')?.addEventListener('submit', (e) => {
+    e.preventDefault();
+    const inp = document.getElementById('inputChatMessage');
+    if (inp && inp.value.trim()) {
+      broadcastTextMessage(inp.value.trim());
+      inp.value = '';
+    }
+  });
+
+  document.getElementById('btnClearChatHistory')?.addEventListener('click', () => {
+    state.chatHistory = [];
+    renderChatLog();
+  });
+
+  document.getElementById('btnSendTestBeep')?.addEventListener('click', sendSyntheticBeep);
+
+  document.getElementById('chatLogFeed')?.addEventListener('click', (e) => {
+    const btn = e.target.closest('.btn-play-voice-item');
+    if (btn) {
+      const idx = parseInt(btn.dataset.idx);
+      const item = state.chatHistory[idx];
+      if (item && item.audio) {
+        unlockGlobalAudio();
+        playIncomingVoice(item.senderName || 'Suara', item.audio);
+      }
+    }
+  });
 
   // Auto-start VOX engine if saved
   if (state.micMode === 'VOX') startVoxEngine();
