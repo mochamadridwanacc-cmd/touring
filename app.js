@@ -23,7 +23,10 @@ const state = {
   isOcrBusy: false,
   isSimulationActive: false,
   simInterval: null,
-  tesseractWorker: null
+  tesseractWorker: null,
+  micMode: 'PTT', // 'PTT' | 'ALWAYS_ON' | 'VOX'
+  voxThreshold: -35, // dB
+  isMutedByHost: false
 };
 
 // Preset Convoy Members (Dummies initialized by Master if needed)
@@ -110,6 +113,7 @@ function initCloudMqtt() {
   const cleanRoom = (state.roomCode || 'TOURING-1').replace(/[^A-Z0-9_-]/gi, '');
   const topicLocation = `touringmate/rooms/${cleanRoom}/loc`;
   const topicControl = `touringmate/rooms/${cleanRoom}/ctl`;
+  const topicVoice = `touringmate/rooms/${cleanRoom}/voice`;
 
   try {
     const clientId = 'tm-' + Date.now() + '-' + Math.random().toString(36).substring(2, 9);
@@ -123,7 +127,7 @@ function initCloudMqtt() {
 
     state.mqttClient.on('connect', () => {
       console.log('Connected to Cloud Realtime MQTT!');
-      state.mqttClient.subscribe([topicLocation, topicControl], () => {
+      state.mqttClient.subscribe([topicLocation, topicControl, topicVoice], () => {
         const syncInd = document.getElementById('serverSyncIndicator');
         if (syncInd) {
           syncInd.innerHTML = `<span class="w-1.5 h-1.5 rounded-full bg-emerald-500 animate-pulse"></span> Cloud Live (${state.roomCode})`;
@@ -145,6 +149,11 @@ function initCloudMqtt() {
             state.activeCloudRiders[msg.id] = msg;
             refreshCloudConvoy();
           }
+        } else if (topic.endsWith('/voice')) {
+          // Received live walkie-talkie audio from another rider
+          if (msg && msg.audio && msg.senderId !== myId) {
+            playIncomingVoice(msg.senderName, msg.audio);
+          }
         } else if (topic.endsWith('/ctl')) {
           // Received control command from Master
           if (msg.action === 'delete') {
@@ -157,11 +166,18 @@ function initCloudMqtt() {
             state.riders = [];
             updateMapMarkers();
             renderRoster();
-          } else if (msg.action === 'set_convoy' && Array.isArray(msg.convoyList)) {
-            msg.convoyList.forEach(r => {
-              if (r.id !== myId) state.activeCloudRiders[r.id] = r;
-            });
-            refreshCloudConvoy();
+          } else if (msg.action === 'mute_rider') {
+            if (msg.targetId === myId) {
+              applyHostMute(!!msg.muted);
+            }
+            if (state.activeCloudRiders[msg.targetId]) {
+              state.activeCloudRiders[msg.targetId].isMutedByHost = !!msg.muted;
+              refreshCloudConvoy();
+            }
+          } else if (msg.action === 'mute_all') {
+            if (!state.myProfile?.isMaster) {
+              applyHostMute(!!msg.muted);
+            }
           }
         }
       } catch (e) {
@@ -181,14 +197,14 @@ function switchCloudRoom(newRoomCode) {
   const cleanOld = (state.roomCode || 'TOURING-1').replace(/[^A-Z0-9_-]/gi, '');
   const cleanNew = (newRoomCode || 'TOURING-1').replace(/[^A-Z0-9_-]/gi, '');
 
-  state.mqttClient.unsubscribe([`touringmate/rooms/${cleanOld}/loc`, `touringmate/rooms/${cleanOld}/ctl`]);
+  state.mqttClient.unsubscribe([`touringmate/rooms/${cleanOld}/loc`, `touringmate/rooms/${cleanOld}/ctl`, `touringmate/rooms/${cleanOld}/voice`]);
   state.roomCode = cleanNew;
   state.activeCloudRiders = {};
   state.riders = [];
   updateMapMarkers();
   renderRoster();
 
-  state.mqttClient.subscribe([`touringmate/rooms/${cleanNew}/loc`, `touringmate/rooms/${cleanNew}/ctl`], () => {
+  state.mqttClient.subscribe([`touringmate/rooms/${cleanNew}/loc`, `touringmate/rooms/${cleanNew}/ctl`, `touringmate/rooms/${cleanNew}/voice`], () => {
     const syncInd = document.getElementById('serverSyncIndicator');
     if (syncInd) {
       syncInd.innerHTML = `<span class="w-1.5 h-1.5 rounded-full bg-emerald-500 animate-pulse"></span> Cloud Live (${state.roomCode})`;
@@ -226,6 +242,23 @@ function refreshCloudConvoy() {
    1. USER PROFILE, DEVICE ROLE (MASTER / PESERTA) & REALTIME SYNC
    ========================================================================== */
 function loadProfile() {
+  // 1. Auto-detect and populate Room Code from URL query parameter e.g. ?room=3431
+  const urlParams = new URLSearchParams(window.location.search);
+  const queryRoom = urlParams.get('room');
+  if (queryRoom) {
+    state.roomCode = queryRoom.trim().toUpperCase();
+    localStorage.setItem('touring_room', state.roomCode);
+  } else {
+    const savedRoom = localStorage.getItem('touring_room');
+    if (savedRoom) state.roomCode = savedRoom.toUpperCase();
+  }
+
+  // Pre-fill input in modal
+  const roomInput = document.getElementById('inputRoomCode');
+  if (roomInput) {
+    roomInput.value = state.roomCode || 'TOURING-1';
+  }
+
   const saved = localStorage.getItem('touring_profile');
   if (saved) {
     state.myProfile = JSON.parse(saved);
@@ -271,6 +304,16 @@ function updateProfileUI() {
     } else {
       devBadge.className = 'px-1.5 py-0.5 rounded text-[10px] bg-emerald-500/20 text-emerald-400 font-bold border border-emerald-500/40';
       devBadge.textContent = '🏍️ PESERTA';
+    }
+  }
+
+  // Host Mute All controls in drawer
+  const hostMicCtrl = document.getElementById('hostMicControls');
+  if (hostMicCtrl) {
+    if (state.myProfile && state.myProfile.isMaster) {
+      hostMicCtrl.classList.remove('hidden');
+    } else {
+      hostMicCtrl.classList.add('hidden');
     }
   }
 }
@@ -582,11 +625,16 @@ function renderRoster() {
             <span class="font-mono text-amber-300 font-bold">${rider.plate}</span>
           </div>
         </div>
-        <div class="flex items-center gap-2 flex-shrink-0">
+        <div class="flex items-center gap-1.5 flex-shrink-0">
           <div class="text-right">
             <div class="text-base font-black font-mono text-slate-100">${formatDistance(rider.distance)}</div>
             <div>${directionIcon}</div>
           </div>
+          ${state.myProfile?.isMaster ? `
+            <button class="btn-mute-rider p-1.5 rounded-lg ${rider.isMutedByHost ? 'text-rose-400 bg-rose-500/25 border border-rose-500/40' : 'text-slate-400 hover:text-rose-400 hover:bg-rose-500/10'} transition" data-id="${rider.id}" data-muted="${rider.isMutedByHost ? '1' : '0'}" title="${rider.isMutedByHost ? 'Buka Mic' : 'Matikan Mic Rider'}">
+              <i data-lucide="${rider.isMutedByHost ? 'mic-off' : 'mic'}" class="w-4 h-4 pointer-events-none"></i>
+            </button>
+          ` : ''}
           <button class="btn-delete-rider p-1.5 rounded-lg text-slate-500 hover:text-rose-400 hover:bg-rose-500/10 transition" data-id="${rider.id}" title="Hapus ${rider.name}">
             <i data-lucide="trash-2" class="w-4 h-4 pointer-events-none"></i>
           </button>
@@ -1126,6 +1174,437 @@ function initEventListeners() {
       alert('Link berhasil disalin ke clipboard!');
     });
   });
+
+  // ==========================================================================
+  // ADVANCED VOICE INTERCOM (PTT / ALWAYS ON / VOX AUTO WITH DECIBEL & HOST MUTE)
+  // ==========================================================================
+  let mediaRecorder = null;
+  let audioChunks = [];
+  let isRecordingPtt = false;
+  let voxAudioContext = null;
+  let voxAnalyser = null;
+  let voxSource = null;
+  let voxStream = null;
+  let voxAnimFrame = null;
+  let isVoxTransmitting = false;
+  let voxSilenceTimer = null;
+  let alwaysOnInterval = null;
+
+  // Restore saved mic settings
+  const savedMicMode = localStorage.getItem('touring_mic_mode');
+  if (savedMicMode) state.micMode = savedMicMode;
+  const savedVoxDb = localStorage.getItem('touring_vox_db');
+  if (savedVoxDb) state.voxThreshold = parseInt(savedVoxDb);
+
+  // Update VOX slider and text
+  const voxSlider = document.getElementById('voxThresholdSlider');
+  const voxDbText = document.getElementById('voxDbValueText');
+  const voxThreshLine = document.getElementById('voxThresholdLine');
+  if (voxSlider) {
+    voxSlider.value = state.voxThreshold;
+    if (voxDbText) voxDbText.textContent = `${state.voxThreshold} dB`;
+    if (voxThreshLine) {
+      const pct = Math.round(((state.voxThreshold + 60) / 45) * 100);
+      voxThreshLine.style.left = `${Math.max(5, Math.min(95, pct))}%`;
+    }
+  }
+
+  // Set radio choice in modal
+  if (document.getElementById('micMode' + (state.micMode === 'ALWAYS_ON' ? 'AlwaysOn' : (state.micMode === 'VOX' ? 'Vox' : 'Ptt')))) {
+    document.getElementById('micMode' + (state.micMode === 'ALWAYS_ON' ? 'AlwaysOn' : (state.micMode === 'VOX' ? 'Vox' : 'Ptt'))).checked = true;
+  }
+
+  updatePttButtonUI();
+
+  // Modal open/close
+  const micModal = document.getElementById('micSettingsModal');
+  document.getElementById('btnOpenMicModal').addEventListener('click', () => {
+    micModal.classList.remove('hidden');
+    startVoxEngine(); // Start audio context for live meter preview
+  });
+  document.getElementById('btnCloseMicModal').addEventListener('click', () => {
+    micModal.classList.add('hidden');
+  });
+
+  // Slider change
+  if (voxSlider) {
+    voxSlider.addEventListener('input', (e) => {
+      state.voxThreshold = parseInt(e.target.value);
+      if (voxDbText) voxDbText.textContent = `${state.voxThreshold} dB`;
+      localStorage.setItem('touring_vox_db', state.voxThreshold);
+      if (voxThreshLine) {
+        const pct = Math.round(((state.voxThreshold + 60) / 45) * 100);
+        voxThreshLine.style.left = `${Math.max(5, Math.min(95, pct))}%`;
+      }
+    });
+  }
+
+  // Save Mic Settings button
+  document.getElementById('btnSaveMicSettings').addEventListener('click', () => {
+    const selectedMode = document.querySelector('input[name="micModeRadio"]:checked')?.value || 'PTT';
+    setMicMode(selectedMode);
+    micModal.classList.add('hidden');
+  });
+
+  function setMicMode(newMode) {
+    state.micMode = newMode;
+    localStorage.setItem('touring_mic_mode', newMode);
+
+    // Stop previous modes
+    stopPttRecording();
+    clearInterval(alwaysOnInterval);
+
+    if (state.micMode === 'ALWAYS_ON') {
+      startAlwaysOnMode();
+    } else if (state.micMode === 'VOX') {
+      startVoxEngine();
+    }
+
+    updatePttButtonUI();
+  }
+
+  function updatePttButtonUI() {
+    const pttBtn = document.getElementById('btnPtt');
+    const pttLabel = document.getElementById('pttLabel');
+    if (!pttBtn || !pttLabel) return;
+
+    if (state.isMutedByHost) {
+      pttBtn.className = 'w-16 h-16 rounded-full bg-rose-950/80 border-2 border-rose-500 text-rose-400 shadow-2xl flex flex-col items-center justify-center transition-all opacity-80 cursor-not-allowed select-none';
+      pttLabel.textContent = 'MUTED';
+      return;
+    }
+
+    if (state.micMode === 'ALWAYS_ON') {
+      pttBtn.className = 'w-16 h-16 rounded-full bg-emerald-600 border-2 border-emerald-300 text-white shadow-2xl flex flex-col items-center justify-center transition-all select-none animate-pulse';
+      pttLabel.textContent = 'OPEN MIC';
+    } else if (state.micMode === 'VOX') {
+      pttBtn.className = 'w-16 h-16 rounded-full bg-cyan-950/90 border-2 border-cyan-400 text-cyan-300 shadow-2xl flex flex-col items-center justify-center transition-all select-none';
+      pttLabel.textContent = 'VOX AUTO';
+    } else {
+      // PTT Default
+      pttBtn.className = 'w-16 h-16 rounded-full bg-slate-900/95 hover:bg-slate-800 border-2 border-emerald-500/80 text-emerald-400 shadow-2xl flex flex-col items-center justify-center transition-all transform active:scale-95 group focus:outline-none select-none';
+      pttLabel.textContent = 'PTT';
+    }
+  }
+
+  // VOX Engine: decibel detection and auto-transmission
+  async function startVoxEngine() {
+    if (voxStream) return;
+    try {
+      voxStream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      voxAudioContext = new (window.AudioContext || window.webkitAudioContext)();
+      voxSource = voxAudioContext.createMediaStreamSource(voxStream);
+      voxAnalyser = voxAudioContext.createAnalyser();
+      voxAnalyser.fftSize = 512;
+      voxAnalyser.smoothingTimeConstant = 0.3;
+      voxSource.connect(voxAnalyser);
+
+      const dataArray = new Uint8Array(voxAnalyser.frequencyBinCount);
+
+      function checkAudioLevel() {
+        if (!voxAnalyser) return;
+        voxAnalyser.getByteFrequencyData(dataArray);
+
+        let sum = 0;
+        for (let i = 0; i < dataArray.length; i++) {
+          sum += dataArray[i] * dataArray[i];
+        }
+        const rms = Math.sqrt(sum / dataArray.length);
+        const db = rms > 0 ? Math.round(20 * Math.log10(rms / 255)) : -90;
+
+        // Update live meter bar in settings modal
+        const liveBar = document.getElementById('voxLiveBar');
+        const statusEl = document.getElementById('voxMeterStatus');
+        if (liveBar) {
+          const barPct = Math.round(((Math.max(-60, Math.min(0, db)) + 60) / 60) * 100);
+          liveBar.style.width = `${barPct}%`;
+          if (db >= state.voxThreshold) {
+            liveBar.className = 'bg-rose-500 h-2 transition-all duration-75';
+            if (statusEl) {
+              statusEl.textContent = 'Bicara (Aktif)';
+              statusEl.className = 'font-bold text-rose-400';
+            }
+          } else {
+            liveBar.className = 'bg-emerald-500 h-2 transition-all duration-75';
+            if (statusEl) {
+              statusEl.textContent = 'Hening';
+              statusEl.className = 'font-bold text-slate-500';
+            }
+          }
+        }
+
+        // Trigger VOX Auto transmit
+        if (state.micMode === 'VOX' && !state.isMutedByHost) {
+          if (db >= state.voxThreshold) {
+            clearTimeout(voxSilenceTimer);
+            if (!isVoxTransmitting) {
+              isVoxTransmitting = true;
+              startPttRecording(voxStream);
+            }
+          } else if (isVoxTransmitting) {
+            // Keep sending for 850ms hangover time
+            if (!voxSilenceTimer) {
+              voxSilenceTimer = setTimeout(() => {
+                isVoxTransmitting = false;
+                stopPttRecording();
+                voxSilenceTimer = null;
+              }, 850);
+            }
+          }
+        }
+
+        voxAnimFrame = requestAnimationFrame(checkAudioLevel);
+      }
+
+      checkAudioLevel();
+    } catch (err) {
+      console.warn('Microphone access for VOX denied:', err);
+    }
+  }
+
+  // Always On Mode: continuous chunks of 2 seconds
+  function startAlwaysOnMode() {
+    if (state.isMutedByHost) return;
+    startPttRecording();
+    alwaysOnInterval = setInterval(() => {
+      if (state.micMode === 'ALWAYS_ON' && !state.isMutedByHost) {
+        stopPttRecording();
+        setTimeout(startPttRecording, 150);
+      }
+    }, 2500);
+  }
+
+  // Core Audio Recording
+  async function startPttRecording(existingStream = null) {
+    if (isRecordingPtt || state.isMutedByHost) return;
+    try {
+      const stream = existingStream || await navigator.mediaDevices.getUserMedia({ audio: true });
+      let options = {};
+      if (typeof MediaRecorder !== 'undefined') {
+        if (MediaRecorder.isTypeSupported('audio/webm;codecs=opus')) {
+          options = { mimeType: 'audio/webm;codecs=opus' };
+        } else if (MediaRecorder.isTypeSupported('audio/mp4')) {
+          options = { mimeType: 'audio/mp4' };
+        }
+      }
+
+      mediaRecorder = new MediaRecorder(stream, options);
+      audioChunks = [];
+
+      mediaRecorder.ondataavailable = (e) => {
+        if (e.data && e.data.size > 0) audioChunks.push(e.data);
+      };
+
+      mediaRecorder.onstop = () => {
+        if (!existingStream) stream.getTracks().forEach(t => t.stop());
+        if (audioChunks.length === 0) return;
+
+        const mime = mediaRecorder.mimeType || 'audio/webm';
+        const audioBlob = new Blob(audioChunks, { type: mime });
+        const reader = new FileReader();
+        reader.onloadend = () => {
+          broadcastVoice(reader.result);
+        };
+        reader.readAsDataURL(audioBlob);
+      };
+
+      mediaRecorder.start();
+      isRecordingPtt = true;
+
+      const pttBtn = document.getElementById('btnPtt');
+      const pttInd = document.getElementById('pttStatusIndicator');
+      if (pttBtn && state.micMode === 'PTT') {
+        pttBtn.className = 'w-16 h-16 rounded-full bg-rose-600 border-4 border-rose-300 text-white shadow-2xl flex flex-col items-center justify-center transition-all transform scale-110 select-none animate-pulse';
+      }
+      if (pttInd) pttInd.classList.remove('hidden');
+
+    } catch (err) {
+      console.warn('Microphone access denied:', err);
+      alert('Izin mikrofon diperlukan untuk interkom suara.\nKlik "Izinkan / Allow" mikrofon di browser.');
+    }
+  }
+
+  function stopPttRecording() {
+    if (!isRecordingPtt || !mediaRecorder) return;
+    try {
+      if (mediaRecorder.state !== 'inactive') {
+        mediaRecorder.stop();
+      }
+    } catch (e) {}
+
+    isRecordingPtt = false;
+
+    const pttBtn = document.getElementById('btnPtt');
+    const pttInd = document.getElementById('pttStatusIndicator');
+    if (pttBtn && state.micMode === 'PTT') {
+      pttBtn.className = 'w-16 h-16 rounded-full bg-slate-900/95 hover:bg-slate-800 border-2 border-emerald-500/80 text-emerald-400 shadow-2xl flex flex-col items-center justify-center transition-all transform active:scale-95 group focus:outline-none select-none';
+    }
+    if (pttInd) pttInd.classList.add('hidden');
+  }
+
+  function broadcastVoice(audioDataUrl) {
+    if (!state.mqttClient || !state.mqttClient.connected || state.isMutedByHost) return;
+    const cleanRoom = (state.roomCode || 'TOURING-1').replace(/[^A-Z0-9_-]/gi, '');
+    const topicVoice = `touringmate/rooms/${cleanRoom}/voice`;
+
+    const payload = {
+      senderId: state.myProfile ? state.myProfile.id : 'unknown',
+      senderName: state.myProfile ? state.myProfile.name : 'Rider',
+      audio: audioDataUrl,
+      timestamp: Date.now()
+    };
+
+    state.mqttClient.publish(topicVoice, JSON.stringify(payload));
+  }
+
+  function playIncomingVoice(speakerName, audioDataUrl) {
+    const toast = document.getElementById('incomingVoiceToast');
+    const speakerEl = document.getElementById('incomingVoiceSpeaker');
+    if (speakerEl) speakerEl.textContent = `${speakerName}...`;
+    if (toast) toast.classList.remove('hidden');
+
+    const audio = new Audio(audioDataUrl);
+    audio.play().then(() => {
+      audio.onended = () => {
+        if (toast) toast.classList.add('hidden');
+      };
+    }).catch(e => {
+      console.warn('Audio auto-play caught:', e);
+      if (toast) toast.classList.add('hidden');
+    });
+  }
+
+  // Host Mute application
+  function applyHostMute(isMuted) {
+    state.isMutedByHost = isMuted;
+    if (isMuted) {
+      stopPttRecording();
+      clearInterval(alwaysOnInterval);
+      alert('Mikrofon Anda dimatikan oleh Road Captain / Host.');
+    } else {
+      alert('Mikrofon Anda telah diaktifkan kembali oleh Road Captain / Host.');
+      if (state.micMode === 'ALWAYS_ON') startAlwaysOnMode();
+    }
+    updatePttButtonUI();
+  }
+
+  // PTT Button Event Listeners: Supports both Tap to toggle & Hold to talk
+  const pttButton = document.getElementById('btnPtt');
+  let holdTimeout = null;
+  let isHoldActive = false;
+
+  if (pttButton) {
+    // Touch (Mobile)
+    pttButton.addEventListener('touchstart', (e) => {
+      e.preventDefault();
+      if (state.isMutedByHost) return;
+      if (state.micMode === 'ALWAYS_ON') {
+        // Toggle Mute on/off in Always On
+        if (isRecordingPtt) stopPttRecording(); else startPttRecording();
+        return;
+      }
+      isHoldActive = false;
+      holdTimeout = setTimeout(() => {
+        isHoldActive = true;
+        startPttRecording();
+      }, 200);
+    });
+
+    pttButton.addEventListener('touchend', (e) => {
+      e.preventDefault();
+      clearTimeout(holdTimeout);
+      if (state.isMutedByHost || state.micMode === 'ALWAYS_ON') return;
+      if (isHoldActive) {
+        stopPttRecording();
+      } else {
+        // Single tap toggle
+        if (isRecordingPtt) stopPttRecording(); else startPttRecording();
+      }
+      isHoldActive = false;
+    });
+
+    // Click/Mouse (Desktop)
+    pttButton.addEventListener('mousedown', (e) => {
+      e.preventDefault();
+      if (state.isMutedByHost) return;
+      if (state.micMode === 'ALWAYS_ON') {
+        if (isRecordingPtt) stopPttRecording(); else startPttRecording();
+        return;
+      }
+      isHoldActive = false;
+      holdTimeout = setTimeout(() => {
+        isHoldActive = true;
+        startPttRecording();
+      }, 200);
+    });
+
+    pttButton.addEventListener('mouseup', (e) => {
+      e.preventDefault();
+      clearTimeout(holdTimeout);
+      if (state.isMutedByHost || state.micMode === 'ALWAYS_ON') return;
+      if (isHoldActive) {
+        stopPttRecording();
+      } else {
+        if (isRecordingPtt) stopPttRecording(); else startPttRecording();
+      }
+      isHoldActive = false;
+    });
+
+    pttButton.addEventListener('mouseleave', () => {
+      clearTimeout(holdTimeout);
+      if (isHoldActive) stopPttRecording();
+      isHoldActive = false;
+    });
+  }
+
+  // Host Mute Roster Events
+  document.getElementById('riderListContainer').addEventListener('click', (e) => {
+    const muteBtn = e.target.closest('.btn-mute-rider');
+    if (muteBtn) {
+      const riderId = muteBtn.dataset.id;
+      const currentMuted = muteBtn.dataset.muted === '1';
+      const targetRider = state.riders.find(r => r.id === riderId);
+      const name = targetRider ? targetRider.name : 'Rider';
+
+      const newMuted = !currentMuted;
+      if (state.mqttClient && state.mqttClient.connected) {
+        const cleanRoom = (state.roomCode || 'TOURING-1').replace(/[^A-Z0-9_-]/gi, '');
+        state.mqttClient.publish(`touringmate/rooms/${cleanRoom}/ctl`, JSON.stringify({
+          action: 'mute_rider',
+          targetId: riderId,
+          muted: newMuted
+        }));
+      }
+      if (targetRider) targetRider.isMutedByHost = newMuted;
+      renderRoster();
+      alert(`Berhasil ${newMuted ? 'mematikan' : 'mengaktifkan'} mic untuk ${name}!`);
+    }
+  });
+
+  // Host Mute All Button
+  const muteAllBtn = document.getElementById('btnHostToggleMuteAll');
+  let isAllMuted = false;
+  if (muteAllBtn) {
+    muteAllBtn.addEventListener('click', () => {
+      isAllMuted = !isAllMuted;
+      if (state.mqttClient && state.mqttClient.connected) {
+        const cleanRoom = (state.roomCode || 'TOURING-1').replace(/[^A-Z0-9_-]/gi, '');
+        state.mqttClient.publish(`touringmate/rooms/${cleanRoom}/ctl`, JSON.stringify({
+          action: 'mute_all',
+          muted: isAllMuted
+        }));
+      }
+      muteAllBtn.innerHTML = isAllMuted 
+        ? '<i data-lucide="mic" class="w-3.5 h-3.5"></i> Buka Mic Semua Peserta (Unmute All)'
+        : '<i data-lucide="mic-off" class="w-3.5 h-3.5"></i> Matikan Semua Mic Peserta (Mute All)';
+      if (window.lucide) lucide.createIcons();
+      alert(`Semua mic peserta telah ${isAllMuted ? 'dimatikan' : 'diaktifkan kembali'}!`);
+    });
+  }
+
+  // Auto-start VOX engine if saved
+  if (state.micMode === 'VOX') startVoxEngine();
+  else if (state.micMode === 'ALWAYS_ON') startAlwaysOnMode();
 
   // Auto-start camera in background if supported
   startCamera();
