@@ -1207,11 +1207,10 @@ function initEventListeners() {
   // ADVANCED VOICE INTERCOM (UNIVERSAL 16kHz WAV + iOS AUTOPLAY UNLOCK)
   // ==========================================================================
   let isRecordingPtt = false;
-  let pttStream = null;
+  let persistentMicStream = null;
   let pttSource = null;
   let pttProcessor = null;
-  let pttSilenceGain = null;
-  let pttPcmChunks = [];
+  let recordedPcmBuffers = [];
 
   let voxAudioContext = null;
   let voxAnalyser = null;
@@ -1306,7 +1305,10 @@ function initEventListeners() {
       return;
     }
 
-    if (state.micMode === 'ALWAYS_ON') {
+    if (isRecordingPtt) {
+      pttBtn.className = 'w-16 h-16 rounded-full bg-rose-600 border-4 border-rose-300 text-white shadow-2xl flex flex-col items-center justify-center transition-all transform scale-110 select-none animate-pulse';
+      pttLabel.textContent = 'REC...';
+    } else if (state.micMode === 'ALWAYS_ON') {
       pttBtn.className = 'w-16 h-16 rounded-full bg-emerald-600 border-2 border-emerald-300 text-white shadow-2xl flex flex-col items-center justify-center transition-all select-none animate-pulse';
       pttLabel.textContent = 'OPEN MIC';
     } else if (state.micMode === 'VOX') {
@@ -1316,6 +1318,19 @@ function initEventListeners() {
       // PTT Default
       pttBtn.className = 'w-16 h-16 rounded-full bg-slate-900/95 hover:bg-slate-800 border-2 border-emerald-500/80 text-emerald-400 shadow-2xl flex flex-col items-center justify-center transition-all transform active:scale-95 group focus:outline-none select-none';
       pttLabel.textContent = 'PTT';
+    }
+  }
+
+  function showPttToast(text, duration = 1500) {
+    const ind = document.getElementById('pttStatusIndicator');
+    const txt = document.getElementById('pttStatusText');
+    if (!ind || !txt) return;
+    txt.textContent = text;
+    ind.classList.remove('hidden');
+    if (duration > 0) {
+      setTimeout(() => {
+        if (!isRecordingPtt) ind.classList.add('hidden');
+      }, duration);
     }
   }
 
@@ -1406,17 +1421,32 @@ function initEventListeners() {
     } catch (e) {}
   }
 
-  // VOX Engine: decibel detection and auto-transmission
-  async function startVoxEngine() {
-    if (voxStream) return;
+  // --- PERSISTENT MICROPHONE ACQUISITION ---
+  async function getMicStream() {
+    if (persistentMicStream && persistentMicStream.active) {
+      return persistentMicStream;
+    }
     try {
-      voxStream = await navigator.mediaDevices.getUserMedia({
+      persistentMicStream = await navigator.mediaDevices.getUserMedia({
         audio: {
           echoCancellation: true,
           noiseSuppression: true,
           autoGainControl: true
         }
       });
+      return persistentMicStream;
+    } catch (e) {
+      // Fallback for strict mobile devices
+      persistentMicStream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      return persistentMicStream;
+    }
+  }
+
+  // VOX Engine: decibel detection and auto-transmission
+  async function startVoxEngine() {
+    if (voxStream) return;
+    try {
+      voxStream = await getMicStream();
       voxAudioContext = getSharedAudioContext();
       if (voxAudioContext && voxAudioContext.state === 'suspended') {
         try { await voxAudioContext.resume(); } catch (e) {}
@@ -1490,7 +1520,7 @@ function initEventListeners() {
     }
   }
 
-  // Always On Mode: continuous chunks of 2.5 seconds
+  // Always On Mode: continuous streaming chunks of 2.5 seconds
   function startAlwaysOnMode() {
     if (state.isMutedByHost) return;
     startPttRecording();
@@ -1505,19 +1535,21 @@ function initEventListeners() {
   // Core Audio Recording using Web Audio ScriptProcessorNode (Cross-browser compatible iOS + Android + Desktop)
   async function startPttRecording(existingStream = null) {
     if (isRecordingPtt || state.isMutedByHost) return;
+    isRecordingPtt = true;
+    updatePttButtonUI();
+    showPttToast('🔴 MEREKAM...', 0);
+
     const ctx = getSharedAudioContext();
     if (ctx && ctx.state === 'suspended') {
       try { await ctx.resume(); } catch (e) {}
     }
 
     try {
-      pttStream = existingStream || await navigator.mediaDevices.getUserMedia({
-        audio: {
-          echoCancellation: true,
-          noiseSuppression: true,
-          autoGainControl: true
-        }
-      });
+      const stream = existingStream || await getMicStream();
+      if (!isRecordingPtt) {
+        // User already released button
+        return;
+      }
 
       if (pttSource) {
         try { pttSource.disconnect(); } catch (e) {}
@@ -1526,41 +1558,36 @@ function initEventListeners() {
         try { pttProcessor.disconnect(); } catch (e) {}
       }
 
-      pttSource = ctx.createMediaStreamSource(pttStream);
+      pttSource = ctx.createMediaStreamSource(stream);
       pttProcessor = ctx.createScriptProcessor(4096, 1, 1);
-      pttSilenceGain = ctx.createGain();
-      pttSilenceGain.gain.value = 0; // Prevent feedback echo to speaker
+      recordedPcmBuffers = [];
 
-      pttPcmChunks = [];
       pttProcessor.onaudioprocess = (e) => {
-        if (!isRecordingPtt) return;
         const inputData = e.inputBuffer.getChannelData(0);
-        pttPcmChunks.push(new Float32Array(inputData));
+        const outputData = e.outputBuffer.getChannelData(0);
+        outputData.fill(0); // Mute playback to prevent local speaker feedback
+
+        if (isRecordingPtt) {
+          recordedPcmBuffers.push(new Float32Array(inputData));
+        }
       };
 
       pttSource.connect(pttProcessor);
-      pttProcessor.connect(pttSilenceGain);
-      pttSilenceGain.connect(ctx.destination);
-
-      isRecordingPtt = true;
-
-      const pttBtn = document.getElementById('btnPtt');
-      const pttInd = document.getElementById('pttStatusIndicator');
-      if (pttBtn && state.micMode === 'PTT') {
-        pttBtn.className = 'w-16 h-16 rounded-full bg-rose-600 border-4 border-rose-300 text-white shadow-2xl flex flex-col items-center justify-center transition-all transform scale-110 select-none animate-pulse';
-      }
-      if (pttInd) pttInd.classList.remove('hidden');
+      pttProcessor.connect(ctx.destination);
 
     } catch (err) {
       console.warn('Microphone access denied:', err);
+      isRecordingPtt = false;
+      updatePttButtonUI();
+      showPttToast('⚠️ Mic Ditolak');
       alert('Izin mikrofon diperlukan untuk interkom suara.\nKlik "Izinkan / Allow" mikrofon di browser.');
     }
   }
 
-  function flushPcmChunksAndBroadcast() {
-    if (!pttPcmChunks || pttPcmChunks.length === 0) return;
-    const chunksToProcess = pttPcmChunks;
-    pttPcmChunks = [];
+  function flushPcmChunksAndBroadcast(onSuccessCallback = null) {
+    if (!recordedPcmBuffers || recordedPcmBuffers.length === 0) return;
+    const chunksToProcess = recordedPcmBuffers;
+    recordedPcmBuffers = [];
 
     const ctx = getSharedAudioContext();
     const inputSampleRate = (ctx && ctx.sampleRate) ? ctx.sampleRate : 44100;
@@ -1568,8 +1595,8 @@ function initEventListeners() {
 
     let totalLength = 0;
     for (let i = 0; i < chunksToProcess.length; i++) totalLength += chunksToProcess[i].length;
-    // Discard tiny noise clicks (<150ms)
-    if (totalLength < inputSampleRate * 0.15) return;
+    // Discard tiny noise clicks (<100ms)
+    if (totalLength < inputSampleRate * 0.1) return;
 
     const merged = new Float32Array(totalLength);
     let offset = 0;
@@ -1584,6 +1611,7 @@ function initEventListeners() {
     const reader = new FileReader();
     reader.onloadend = () => {
       broadcastVoice(reader.result);
+      if (onSuccessCallback) onSuccessCallback(reader.result);
     };
     reader.readAsDataURL(wavBlob);
   }
@@ -1591,32 +1619,23 @@ function initEventListeners() {
   function stopPttRecording() {
     if (!isRecordingPtt) return;
     isRecordingPtt = false;
+    updatePttButtonUI();
+    showPttToast('📤 Mengirim Suara...', 1200);
 
-    const pttBtn = document.getElementById('btnPtt');
-    const pttInd = document.getElementById('pttStatusIndicator');
-    if (pttBtn && state.micMode === 'PTT') {
-      pttBtn.className = 'w-16 h-16 rounded-full bg-slate-900/95 hover:bg-slate-800 border-2 border-emerald-500/80 text-emerald-400 shadow-2xl flex flex-col items-center justify-center transition-all transform active:scale-95 group focus:outline-none select-none';
-    }
-    if (pttInd) pttInd.classList.add('hidden');
+    setTimeout(() => {
+      flushPcmChunksAndBroadcast(() => {
+        showPttToast('✅ Terkirim!', 1500);
+      });
 
-    flushPcmChunksAndBroadcast();
-
-    if (pttProcessor) {
-      try {
-        pttProcessor.disconnect();
-        if (pttSource) pttSource.disconnect();
-        if (pttSilenceGain) pttSilenceGain.disconnect();
-      } catch (e) {}
-      pttProcessor = null;
-      pttSource = null;
-    }
-
-    if (pttStream && pttStream !== voxStream) {
-      try {
-        pttStream.getTracks().forEach(t => t.stop());
-      } catch (e) {}
-      pttStream = null;
-    }
+      if (pttProcessor) {
+        try {
+          pttProcessor.disconnect();
+          if (pttSource) pttSource.disconnect();
+        } catch (e) {}
+        pttProcessor = null;
+        pttSource = null;
+      }
+    }, 80);
   }
 
   function broadcastVoice(audioDataUrl) {
@@ -1673,7 +1692,7 @@ function initEventListeners() {
 
         const toast = document.getElementById('incomingVoiceToast');
         const speakerEl = document.getElementById('incomingVoiceSpeaker');
-        if (speakerEl) speakerEl.textContent = `${item.speakerName}...`;
+        if (speakerEl) speakerEl.textContent = `${item.speakerName} bicara...`;
         if (toast) toast.classList.remove('hidden');
 
         source.onended = () => {
@@ -1693,6 +1712,81 @@ function initEventListeners() {
       console.warn('Voice play queue error:', err);
       setTimeout(processIncomingVoiceQueue, 100);
     }
+  }
+
+  // Loopback Self-Test (Rekam & Putar Suara Sendiri 3 Detik)
+  const btnLoopback = document.getElementById('btnTestMicLoopback');
+  const txtLoopback = document.getElementById('testMicLoopbackText');
+  let isLoopbackRunning = false;
+  if (btnLoopback) {
+    btnLoopback.addEventListener('click', async () => {
+      if (isLoopbackRunning) return;
+      isLoopbackRunning = true;
+      unlockGlobalAudio();
+
+      try {
+        txtLoopback.textContent = 'Merekam... Bicara sekarang! (3)';
+        btnLoopback.className = 'w-full py-2 bg-rose-600 text-white font-bold rounded-xl text-xs flex items-center justify-center gap-1.5 transition animate-pulse';
+
+        await startPttRecording();
+
+        let count = 3;
+        const countdownTimer = setInterval(() => {
+          count--;
+          if (count > 0) {
+            txtLoopback.textContent = `Merekam... Bicara sekarang! (${count})`;
+          } else {
+            clearInterval(countdownTimer);
+            txtLoopback.textContent = 'Memutar suara rekaman Anda...';
+            btnLoopback.className = 'w-full py-2 bg-emerald-600 text-white font-bold rounded-xl text-xs flex items-center justify-center gap-1.5 transition';
+
+            // Collect buffers
+            isRecordingPtt = false;
+            updatePttButtonUI();
+
+            setTimeout(() => {
+              if (recordedPcmBuffers.length > 0) {
+                const chunks = recordedPcmBuffers;
+                recordedPcmBuffers = [];
+                const ctx = getSharedAudioContext();
+                const inputSampleRate = ctx ? ctx.sampleRate : 44100;
+                let totalLength = 0;
+                for (let i = 0; i < chunks.length; i++) totalLength += chunks[i].length;
+                const merged = new Float32Array(totalLength);
+                let offset = 0;
+                for (let i = 0; i < chunks.length; i++) {
+                  merged.set(chunks[i], offset);
+                  offset += chunks[i].length;
+                }
+                const downsampled = downsampleBuffer(merged, inputSampleRate, 16000);
+                const wavBlob = encodeWAV(downsampled, 16000);
+                const reader = new FileReader();
+                reader.onloadend = () => {
+                  playIncomingVoice('Tes Suara Anda Sendiri', reader.result);
+                  setTimeout(() => {
+                    isLoopbackRunning = false;
+                    txtLoopback.textContent = 'Tes Rekam & Putar Suara Saya (3 dtk)';
+                    btnLoopback.className = 'w-full py-2 bg-slate-800 hover:bg-slate-700 text-cyan-400 font-semibold border border-cyan-500/30 rounded-xl text-xs flex items-center justify-center gap-1.5 transition';
+                  }, 3500);
+                };
+                reader.readAsDataURL(wavBlob);
+              } else {
+                alert('Tidak ada suara terdeteksi. Pastikan mikrofon diizinkan!');
+                isLoopbackRunning = false;
+                txtLoopback.textContent = 'Tes Rekam & Putar Suara Saya (3 dtk)';
+                btnLoopback.className = 'w-full py-2 bg-slate-800 hover:bg-slate-700 text-cyan-400 font-semibold border border-cyan-500/30 rounded-xl text-xs flex items-center justify-center gap-1.5 transition';
+              }
+            }, 100);
+          }
+        }, 1000);
+
+      } catch (err) {
+        alert('Gagal tes mic: ' + err.message);
+        isLoopbackRunning = false;
+        txtLoopback.textContent = 'Tes Rekam & Putar Suara Saya (3 dtk)';
+        btnLoopback.className = 'w-full py-2 bg-slate-800 hover:bg-slate-700 text-cyan-400 font-semibold border border-cyan-500/30 rounded-xl text-xs flex items-center justify-center gap-1.5 transition';
+      }
+    });
   }
 
   // Host Mute application
@@ -1728,7 +1822,7 @@ function initEventListeners() {
       holdTimeout = setTimeout(() => {
         isHoldActive = true;
         startPttRecording();
-      }, 200);
+      }, 250);
     }, { passive: false });
 
     pttButton.addEventListener('touchend', (e) => {
@@ -1757,7 +1851,7 @@ function initEventListeners() {
       holdTimeout = setTimeout(() => {
         isHoldActive = true;
         startPttRecording();
-      }, 200);
+      }, 250);
     });
 
     pttButton.addEventListener('mouseup', (e) => {
