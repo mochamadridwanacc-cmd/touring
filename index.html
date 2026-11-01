@@ -18,8 +18,16 @@
   <!-- QRCode.js untuk Generate QR Code Langsung di Browser -->
   <script src="https://cdnjs.cloudflare.com/ajax/libs/qrcodejs/1.0.0/qrcode.min.js"></script>
 
-  <!-- MQTT.js untuk Sinkronisasi Real-Time Cloud Tanpa Server / Static Web -->
-  <script src="https://unpkg.com/mqtt/dist/mqtt.min.js"></script>
+  <!-- MQTT.js untuk Sinkronisasi Real-Time Cloud (Lokal + CDN Fallback) -->
+  <script src="mqtt.min.js"></script>
+  <script>
+    if (typeof mqtt === 'undefined') {
+      document.write('<script src="https://cdnjs.cloudflare.com/ajax/libs/mqtt/5.2.0/mqtt.min.js"><\\/script>');
+    }
+    if (typeof mqtt === 'undefined') {
+      document.write('<script src="https://unpkg.com/mqtt@5.2.0/dist/mqtt.min.js"><\\/script>');
+    }
+  </script>
 
   <!-- Lucide Icons -->
   <script src="https://unpkg.com/lucide@latest"></script>
@@ -535,8 +543,8 @@
               Riwayat Interkom & Pesan
               <span id="chatRoomBadge" class="text-[10px] font-mono px-1.5 py-0.5 rounded bg-slate-800 text-cyan-300 border border-slate-700">Room: -</span>
             </h3>
-            <p id="chatMqttStatusText" class="text-[10px] text-emerald-400 flex items-center gap-1 font-mono">
-              <span class="w-1.5 h-1.5 rounded-full bg-emerald-500 animate-pulse"></span> Cloud MQTT Terhubung
+            <p id="chatMqttStatusText" class="text-[10px] text-amber-400 flex items-center gap-1 font-mono">
+              <span class="w-1.5 h-1.5 rounded-full bg-amber-400 animate-ping"></span> Menghubungkan ke Cloud...
             </p>
           </div>
         </div>
@@ -546,11 +554,16 @@
       </div>
 
       <!-- Quick Test Toolbar -->
-      <div class="px-4 py-2 bg-slate-950/40 border-b border-slate-800 flex items-center justify-between gap-2 text-xs">
-        <span class="text-[11px] text-slate-400 font-mono">Tes Koneksi:</span>
+      <div class="px-4 py-2 bg-slate-950/40 border-b border-slate-800 flex items-center justify-between gap-2 text-xs flex-wrap">
+        <span class="text-[11px] text-slate-400 font-mono flex items-center gap-1">
+          <i data-lucide="activity" class="w-3 h-3 text-cyan-400"></i> Tes Koneksi:
+        </span>
         <div class="flex items-center gap-2">
+          <button id="btnTestPingMqtt" class="px-2.5 py-1 rounded-lg bg-emerald-500/15 hover:bg-emerald-500/30 text-emerald-300 border border-emerald-500/40 text-[11px] font-bold flex items-center gap-1 transition">
+            <i data-lucide="zap" class="w-3 h-3"></i> ⚡ Ping Cloud
+          </button>
           <button id="btnSendTestBeep" class="px-2.5 py-1 rounded-lg bg-cyan-500/15 hover:bg-cyan-500/30 text-cyan-300 border border-cyan-500/40 text-[11px] font-bold flex items-center gap-1 transition">
-            <i data-lucide="radio" class="w-3 h-3"></i> 🧪 Kirim Nada Beep Tes
+            <i data-lucide="radio" class="w-3 h-3"></i> 🧪 Kirim Nada Beep
           </button>
           <button id="btnClearChatHistory" class="px-2 py-1 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-400 text-[11px] transition">
             Hapus Log
@@ -581,6 +594,6 @@
   <!-- Audio element for chime notification -->
   <audio id="alertAudio" src="https://assets.mixkit.co/active_storage/sfx/2869/2869-preview.mp3" preload="auto"></audio>
 
-  <script src="app.js?v=2.4"></script>
+  <script src="app.js?v=2.5"></script>
 </body>
 </html>

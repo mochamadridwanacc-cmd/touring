@@ -28,7 +28,9 @@ const state = {
   voxThreshold: -35, // dB
   isMutedByHost: false,
   chatHistory: [],
-  unreadChatCount: 0
+  unreadChatCount: 0,
+  mqttClientId: 'tm-' + Date.now() + '-' + Math.random().toString(36).substring(2, 9),
+  mqttBrokerName: ''
 };
 
 // Preset Convoy Members (Dummies initialized by Master if needed)
@@ -94,15 +96,72 @@ document.addEventListener('DOMContentLoaded', async () => {
 });
 
 /* ==========================================================================
-   CLOUD REAL-TIME SYNC VIA SECURE WEBSOCKET MQTT (ZERO SERVER / STATIC WEB)
+   CLOUD REAL-TIME SYNC VIA SECURE WEBSOCKET MQTT (MULTI-BROKER FAILOVER)
    ========================================================================== */
+const CLOUD_BROKERS = [
+  { name: 'EMQX Public', url: 'wss://broker.emqx.io:8084/mqtt', opts: {} },
+  { name: 'HiveMQ Public', url: 'wss://broker.hivemq.com:8884/mqtt', opts: {} },
+  { name: 'Shiftr SSL (Port 443)', url: 'wss://public.cloud.shiftr.io:443/mqtt', opts: { username: 'public', password: 'public' } }
+];
+let currentBrokerIdx = 0;
+let mqttConnectTimeoutTimer = null;
+
+function updateMqttStatusUI(status, detail) {
+  const statusEl = document.getElementById('chatMqttStatusText');
+  const syncInd = document.getElementById('serverSyncIndicator');
+  const modalBadge = document.getElementById('chatRoomBadge');
+
+  if (modalBadge) {
+    modalBadge.textContent = `Room: ${state.roomCode || 'TOURING-1'}`;
+  }
+
+  if (status === 'connected') {
+    if (statusEl) {
+      statusEl.className = 'text-[10px] text-emerald-400 flex items-center gap-1 font-mono';
+      statusEl.innerHTML = `<span class="w-1.5 h-1.5 rounded-full bg-emerald-500 animate-pulse"></span> Cloud Terhubung (${detail || state.mqttBrokerName || 'Live'})`;
+    }
+    if (syncInd) {
+      syncInd.innerHTML = `<span class="w-1.5 h-1.5 rounded-full bg-emerald-500 animate-pulse"></span> Cloud Live (${state.roomCode})`;
+    }
+  } else if (status === 'connecting') {
+    if (statusEl) {
+      statusEl.className = 'text-[10px] text-amber-400 flex items-center gap-1 font-mono';
+      statusEl.innerHTML = `<span class="w-1.5 h-1.5 rounded-full bg-amber-400 animate-ping"></span> Menghubungkan ke ${detail || 'Cloud Broker'}...`;
+    }
+    if (syncInd) {
+      syncInd.innerHTML = `<span class="w-1.5 h-1.5 rounded-full bg-amber-400 animate-ping"></span> Menghubungkan...`;
+    }
+  } else {
+    if (statusEl) {
+      statusEl.className = 'text-[10px] text-rose-400 flex items-center gap-1 font-mono';
+      statusEl.innerHTML = `<span class="w-1.5 h-1.5 rounded-full bg-rose-500"></span> Terputus (${detail || 'Offline'})`;
+    }
+    if (syncInd) {
+      syncInd.innerHTML = `<span class="w-1.5 h-1.5 rounded-full bg-rose-500"></span> Offline`;
+    }
+  }
+}
+
 function initCloudMqtt() {
   if (typeof mqtt === 'undefined') {
-    console.warn('MQTT client library not loaded, using fallback HTTP sync');
+    console.warn('MQTT library not yet loaded, waiting...');
+    updateMqttStatusUI('connecting', 'Memuat Library');
+    let retries = 0;
+    const checkTimer = setInterval(() => {
+      retries++;
+      if (typeof mqtt !== 'undefined') {
+        clearInterval(checkTimer);
+        initCloudMqtt();
+      } else if (retries >= 15) {
+        clearInterval(checkTimer);
+        updateMqttStatusUI('offline', 'Library Gagal Dimuat');
+        console.error('MQTT.js failed to load after retries');
+      }
+    }, 400);
     return;
   }
 
-  // Check URL query param for room e.g. ?room=BROMO
+  // Check URL query param for room e.g. ?room=3431
   const urlParams = new URLSearchParams(window.location.search);
   if (urlParams.get('room')) {
     state.roomCode = urlParams.get('room').toUpperCase();
@@ -112,35 +171,80 @@ function initCloudMqtt() {
     if (savedRoom) state.roomCode = savedRoom.toUpperCase();
   }
 
+  if (!state.mqttClientId) {
+    state.mqttClientId = 'tm-' + Date.now() + '-' + Math.random().toString(36).substring(2, 9);
+  }
+
+  const broker = CLOUD_BROKERS[currentBrokerIdx];
+  state.mqttBrokerName = broker.name;
+  console.log(`[MQTT] Connecting to ${broker.name} (${broker.url}) as ${state.mqttClientId}...`);
+  updateMqttStatusUI('connecting', broker.name);
+
+  if (state.mqttClient) {
+    try { state.mqttClient.end(true); } catch (e) {}
+    state.mqttClient = null;
+  }
+
   const cleanRoom = (state.roomCode || 'TOURING-1').replace(/[^A-Z0-9_-]/gi, '');
   const topicLocation = `touringmate/rooms/${cleanRoom}/loc`;
   const topicControl = `touringmate/rooms/${cleanRoom}/ctl`;
   const topicVoice = `touringmate/rooms/${cleanRoom}/voice`;
   const topicChat = `touringmate/rooms/${cleanRoom}/chat`;
+  const topicPing = `touringmate/rooms/${cleanRoom}/ping`;
 
   try {
-    const clientId = 'tm-' + Date.now() + '-' + Math.random().toString(36).substring(2, 9);
-    state.mqttClient = mqtt.connect('wss://broker.emqx.io:8084/mqtt', {
-      clientId,
+    const client = mqtt.connect(broker.url, {
+      clientId: state.mqttClientId,
       clean: true,
       connectTimeout: 7000,
-      reconnectPeriod: 2500,
-      keepalive: 30
+      reconnectPeriod: 3000,
+      keepalive: 30,
+      ...broker.opts
     });
+    state.mqttClient = client;
 
-    state.mqttClient.on('connect', () => {
-      console.log('Connected to Cloud Realtime MQTT!');
-      state.mqttClient.subscribe([topicLocation, topicControl, topicVoice, topicChat], () => {
-        const syncInd = document.getElementById('serverSyncIndicator');
-        if (syncInd) {
-          syncInd.innerHTML = `<span class="w-1.5 h-1.5 rounded-full bg-emerald-500 animate-pulse"></span> Cloud Live (${state.roomCode})`;
+    // Timeout fallback if connection hangs
+    if (mqttConnectTimeoutTimer) clearTimeout(mqttConnectTimeoutTimer);
+    mqttConnectTimeoutTimer = setTimeout(() => {
+      if (state.mqttClient === client && !client.connected) {
+        console.warn(`[MQTT] Timeout connecting to ${broker.name}, trying fallback...`);
+        tryNextBroker();
+      }
+    }, 8000);
+
+    client.on('connect', () => {
+      if (mqttConnectTimeoutTimer) clearTimeout(mqttConnectTimeoutTimer);
+      console.log(`[MQTT] Connected successfully to ${broker.name}!`);
+      updateMqttStatusUI('connected', broker.name);
+
+      client.subscribe([topicLocation, topicControl, topicVoice, topicChat, topicPing], (err) => {
+        if (err) {
+          console.error('[MQTT] Subscription error:', err);
+        } else {
+          console.log('[MQTT] Subscribed to room topics for:', cleanRoom);
+          syncWithServer('update');
         }
-        // Send initial heartbeat immediately upon connect
-        syncWithServer('update');
       });
     });
 
-    state.mqttClient.on('message', (topic, payload) => {
+    client.on('reconnect', () => {
+      console.log(`[MQTT] Reconnecting to ${broker.name}...`);
+      updateMqttStatusUI('connecting', broker.name);
+    });
+
+    client.on('offline', () => {
+      console.warn(`[MQTT] Client went offline`);
+      updateMqttStatusUI('offline', 'Offline');
+    });
+
+    client.on('error', (err) => {
+      console.warn(`[MQTT] Error on ${broker.name}:`, err.message || err);
+      if (!client.connected) {
+        tryNextBroker();
+      }
+    });
+
+    client.on('message', (topic, payload) => {
       try {
         let textPayload = '';
         if (typeof payload === 'string') {
@@ -154,17 +258,19 @@ function initCloudMqtt() {
         const msg = JSON.parse(textPayload);
         const myId = state.myProfile ? state.myProfile.id : null;
 
+        // Ignore self-broadcasts using guaranteed unique clientId or profile id
+        const isSelf = (msg.senderClientId && msg.senderClientId === state.mqttClientId) ||
+                       (msg.senderId && myId && msg.senderId === myId);
+
         if (topic.endsWith('/loc')) {
-          // Received live location update from another rider
-          if (msg && msg.id && msg.id !== myId) {
+          if (msg && msg.id && !isSelf) {
             msg.lastSeen = Date.now();
             state.activeCloudRiders[msg.id] = msg;
             refreshCloudConvoy();
           }
         } else if (topic.endsWith('/chat')) {
-          // Received text chat message
-          console.log('[MQTT Chat] Received text:', msg);
-          if (msg && msg.text && msg.senderId !== myId) {
+          console.log('[MQTT Chat] Received text:', msg, 'isSelf:', isSelf);
+          if (msg && msg.text && !isSelf) {
             appendChatMessage({
               id: 'chat-' + Date.now(),
               type: 'chat_in',
@@ -175,9 +281,8 @@ function initCloudMqtt() {
             showIncomingTextToast(msg.senderName || 'Rider', msg.text);
           }
         } else if (topic.endsWith('/voice')) {
-          console.log('[MQTT Voice] Received voice from:', msg.senderName, 'senderId:', msg.senderId, 'myId:', myId);
-          // Received live walkie-talkie audio from another rider
-          if (msg && msg.audio && msg.senderId !== myId) {
+          console.log('[MQTT Voice] Received voice from:', msg.senderName, 'isSelf:', isSelf);
+          if (msg && msg.audio && !isSelf) {
             const sizeKB = Math.round(msg.audio.length * 0.75 / 1024);
             appendChatMessage({
               id: 'voice-' + Date.now(),
@@ -189,8 +294,11 @@ function initCloudMqtt() {
             });
             playIncomingVoice(msg.senderName || 'Rider', msg.audio);
           }
+        } else if (topic.endsWith('/ping')) {
+          if (msg && msg.pingId && !isSelf) {
+            showIncomingTextToast(msg.senderName || 'Rider', '⚡ Mengirim Ping Koneksi!');
+          }
         } else if (topic.endsWith('/ctl')) {
-          // Received control command from Master
           if (msg.action === 'delete') {
             delete state.activeCloudRiders[msg.targetId];
             state.riders = state.riders.filter(r => r.id !== msg.targetId);
@@ -221,30 +329,52 @@ function initCloudMqtt() {
     });
   } catch (err) {
     console.warn('MQTT connection notice:', err);
+    tryNextBroker();
   }
 }
 
+function tryNextBroker() {
+  currentBrokerIdx = (currentBrokerIdx + 1) % CLOUD_BROKERS.length;
+  console.log(`[MQTT] Switching to broker index ${currentBrokerIdx}: ${CLOUD_BROKERS[currentBrokerIdx].name}`);
+  setTimeout(() => {
+    initCloudMqtt();
+  }, 1000);
+}
+
 function switchCloudRoom(newRoomCode) {
-  if (!state.mqttClient || !state.mqttClient.connected) {
-    state.roomCode = newRoomCode;
-    return;
-  }
   const cleanOld = (state.roomCode || 'TOURING-1').replace(/[^A-Z0-9_-]/gi, '');
   const cleanNew = (newRoomCode || 'TOURING-1').replace(/[^A-Z0-9_-]/gi, '');
 
-  state.mqttClient.unsubscribe([`touringmate/rooms/${cleanOld}/loc`, `touringmate/rooms/${cleanOld}/ctl`, `touringmate/rooms/${cleanOld}/voice`, `touringmate/rooms/${cleanOld}/chat`]);
   state.roomCode = cleanNew;
   state.activeCloudRiders = {};
   state.riders = [];
   updateMapMarkers();
   renderRoster();
 
-  state.mqttClient.subscribe([`touringmate/rooms/${cleanNew}/loc`, `touringmate/rooms/${cleanNew}/ctl`, `touringmate/rooms/${cleanNew}/voice`, `touringmate/rooms/${cleanNew}/chat`], () => {
-    const syncInd = document.getElementById('serverSyncIndicator');
-    if (syncInd) {
-      syncInd.innerHTML = `<span class="w-1.5 h-1.5 rounded-full bg-emerald-500 animate-pulse"></span> Cloud Live (${state.roomCode})`;
+  if (!state.mqttClient || !state.mqttClient.connected) {
+    initCloudMqtt();
+    return;
+  }
+
+  state.mqttClient.unsubscribe([
+    `touringmate/rooms/${cleanOld}/loc`,
+    `touringmate/rooms/${cleanOld}/ctl`,
+    `touringmate/rooms/${cleanOld}/voice`,
+    `touringmate/rooms/${cleanOld}/chat`,
+    `touringmate/rooms/${cleanOld}/ping`
+  ]);
+
+  state.mqttClient.subscribe([
+    `touringmate/rooms/${cleanNew}/loc`,
+    `touringmate/rooms/${cleanNew}/ctl`,
+    `touringmate/rooms/${cleanNew}/voice`,
+    `touringmate/rooms/${cleanNew}/chat`,
+    `touringmate/rooms/${cleanNew}/ping`
+  ], (err) => {
+    if (!err) {
+      updateMqttStatusUI('connected', state.mqttBrokerName);
+      syncWithServer('update');
     }
-    syncWithServer('update');
   });
 }
 
@@ -1674,28 +1804,25 @@ function initEventListeners() {
   }
 
   function broadcastVoice(audioDataUrl) {
-    if (!state.mqttClient || !state.mqttClient.connected || state.isMutedByHost) {
-      console.warn('Cannot broadcast voice: MQTT not connected or muted');
+    if (state.isMutedByHost) {
+      alert('Mikrofon Anda sedang dimatikan oleh Host.');
+      return;
+    }
+    if (!state.mqttClient || !state.mqttClient.connected) {
+      console.warn('Cannot broadcast voice: MQTT not connected');
+      showPttToast('⚠️ Cloud Belum Terhubung');
+      initCloudMqtt();
       return;
     }
     const cleanRoom = (state.roomCode || 'TOURING-1').replace(/[^A-Z0-9_-]/gi, '');
     const topicVoice = `touringmate/rooms/${cleanRoom}/voice`;
 
     const myName = state.myProfile ? state.myProfile.name : 'Saya';
-    const myId = state.myProfile ? state.myProfile.id : 'unknown';
+    const myId = state.myProfile ? state.myProfile.id : state.mqttClientId;
     const sizeKB = Math.round(audioDataUrl.length * 0.75 / 1024);
 
-    // Record to local conversation history
-    appendChatMessage({
-      id: 'voice-' + Date.now(),
-      type: 'voice_out',
-      senderName: myName,
-      sizeKB,
-      audio: audioDataUrl,
-      time: new Date().toLocaleTimeString('id-ID', { hour: '2-digit', minute: '2-digit', second: '2-digit' })
-    });
-
     const payload = {
+      senderClientId: state.mqttClientId,
       senderId: myId,
       senderName: myName,
       audio: audioDataUrl,
@@ -1706,9 +1833,18 @@ function initEventListeners() {
     state.mqttClient.publish(topicVoice, JSON.stringify(payload), { qos: 0 }, (err) => {
       if (err) {
         console.error('[Voice] Publish error:', err);
-        showPttToast('⚠️ Gagal Terkirim');
+        showPttToast('⚠️ Gagal Kirim Suara');
       } else {
         console.log('[Voice] Broadcast success!');
+        // Record to local conversation history only upon successful send
+        appendChatMessage({
+          id: 'voice-' + Date.now(),
+          type: 'voice_out',
+          senderName: myName,
+          sizeKB,
+          audio: audioDataUrl,
+          time: new Date().toLocaleTimeString('id-ID', { hour: '2-digit', minute: '2-digit', second: '2-digit' })
+        });
       }
     });
   }
@@ -2128,30 +2264,68 @@ function initEventListeners() {
 
   function broadcastTextMessage(text) {
     if (!text || !text.trim()) return;
+
+    if (!state.mqttClient || !state.mqttClient.connected) {
+      alert('⚠️ Belum terhubung ke Cloud MQTT. Mohon tunggu status "Cloud Terhubung" (hijau). Menghubungkan ulang...');
+      initCloudMqtt();
+      return;
+    }
+
     const cleanRoom = (state.roomCode || 'TOURING-1').replace(/[^A-Z0-9_-]/gi, '');
     const topicChat = `touringmate/rooms/${cleanRoom}/chat`;
 
     const myName = state.myProfile ? state.myProfile.name : 'Saya';
-    const myId = state.myProfile ? state.myProfile.id : 'unknown';
-
-    appendChatMessage({
-      id: 'chat-' + Date.now(),
-      type: 'chat_out',
-      senderName: myName,
-      text: text.trim(),
-      time: new Date().toLocaleTimeString('id-ID', { hour: '2-digit', minute: '2-digit', second: '2-digit' })
-    });
+    const myId = state.myProfile ? state.myProfile.id : state.mqttClientId;
 
     const payload = {
+      senderClientId: state.mqttClientId,
       senderId: myId,
       senderName: myName,
       text: text.trim(),
       timestamp: Date.now()
     };
 
-    if (state.mqttClient && state.mqttClient.connected) {
-      state.mqttClient.publish(topicChat, JSON.stringify(payload));
+    state.mqttClient.publish(topicChat, JSON.stringify(payload), { qos: 0 }, (err) => {
+      if (err) {
+        alert('Gagal mengirim ke Cloud: ' + err.message);
+      } else {
+        appendChatMessage({
+          id: 'chat-' + Date.now(),
+          type: 'chat_out',
+          senderName: myName,
+          text: text.trim(),
+          time: new Date().toLocaleTimeString('id-ID', { hour: '2-digit', minute: '2-digit', second: '2-digit' })
+        });
+      }
+    });
+  }
+
+  function sendPingTest() {
+    if (!state.mqttClient || !state.mqttClient.connected) {
+      alert('⚠️ Belum terhubung ke Cloud MQTT. Menghubungkan ulang...');
+      initCloudMqtt();
+      return;
     }
+    const cleanRoom = (state.roomCode || 'TOURING-1').replace(/[^A-Z0-9_-]/gi, '');
+    const topicPing = `touringmate/rooms/${cleanRoom}/ping`;
+    const t0 = Date.now();
+    const myName = state.myProfile ? state.myProfile.name : 'Saya';
+
+    const payload = {
+      senderClientId: state.mqttClientId,
+      senderName: myName,
+      pingId: 'ping-' + t0,
+      timestamp: t0
+    };
+
+    state.mqttClient.publish(topicPing, JSON.stringify(payload), { qos: 0 }, (err) => {
+      if (err) {
+        alert('Ping gagal: ' + err.message);
+      } else {
+        const pingTime = Date.now() - t0;
+        alert(`⚡ Ping Berhasil!\nBroker: ${state.mqttBrokerName}\nLatency respon: ~${pingTime} ms\nRoom: ${state.roomCode}`);
+      }
+    });
   }
 
   function sendSyntheticBeep() {
@@ -2210,6 +2384,7 @@ function initEventListeners() {
   });
 
   document.getElementById('btnSendTestBeep')?.addEventListener('click', sendSyntheticBeep);
+  document.getElementById('btnTestPingMqtt')?.addEventListener('click', sendPingTest);
 
   document.getElementById('chatLogFeed')?.addEventListener('click', (e) => {
     const btn = e.target.closest('.btn-play-voice-item');
