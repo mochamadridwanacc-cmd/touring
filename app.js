@@ -878,15 +878,43 @@ function triggerRiderIdentifiedAlert(rider) {
   }
 }
 
-function initAudioContextUnlock() {
-  // Web browsers require user interaction once to allow sound
-  const unlock = () => {
-    if ('speechSynthesis' in window) {
-      window.speechSynthesis.speak(new SpeechSynthesisUtterance(''));
+let sharedAudioContext = null;
+
+function getSharedAudioContext() {
+  if (!sharedAudioContext) {
+    const AudioContextClass = window.AudioContext || window.webkitAudioContext;
+    if (AudioContextClass) {
+      sharedAudioContext = new AudioContextClass();
     }
-    window.removeEventListener('click', unlock);
-  };
-  window.addEventListener('click', unlock);
+  }
+  return sharedAudioContext;
+}
+
+function unlockGlobalAudio() {
+  const ctx = getSharedAudioContext();
+  if (ctx) {
+    if (ctx.state === 'suspended') {
+      ctx.resume().catch(() => {});
+    }
+    try {
+      const silentBuf = ctx.createBuffer(1, 1, 22050);
+      const src = ctx.createBufferSource();
+      src.buffer = silentBuf;
+      src.connect(ctx.destination);
+      src.start(0);
+    } catch (e) {}
+  }
+  if ('speechSynthesis' in window) {
+    try {
+      if (window.speechSynthesis.paused) window.speechSynthesis.resume();
+    } catch (e) {}
+  }
+}
+
+function initAudioContextUnlock() {
+  ['touchstart', 'touchend', 'click', 'keydown'].forEach(evt => {
+    window.addEventListener(evt, unlockGlobalAudio, { passive: true });
+  });
 }
 
 /* ==========================================================================
@@ -1176,11 +1204,15 @@ function initEventListeners() {
   });
 
   // ==========================================================================
-  // ADVANCED VOICE INTERCOM (PTT / ALWAYS ON / VOX AUTO WITH DECIBEL & HOST MUTE)
+  // ADVANCED VOICE INTERCOM (UNIVERSAL 16kHz WAV + iOS AUTOPLAY UNLOCK)
   // ==========================================================================
-  let mediaRecorder = null;
-  let audioChunks = [];
   let isRecordingPtt = false;
+  let pttStream = null;
+  let pttSource = null;
+  let pttProcessor = null;
+  let pttSilenceGain = null;
+  let pttPcmChunks = [];
+
   let voxAudioContext = null;
   let voxAnalyser = null;
   let voxSource = null;
@@ -1251,8 +1283,8 @@ function initEventListeners() {
     localStorage.setItem('touring_mic_mode', newMode);
 
     // Stop previous modes
-    stopPttRecording();
     clearInterval(alwaysOnInterval);
+    if (isRecordingPtt) stopPttRecording();
 
     if (state.micMode === 'ALWAYS_ON') {
       startAlwaysOnMode();
@@ -1287,12 +1319,108 @@ function initEventListeners() {
     }
   }
 
+  // --- AUDIO UTILITIES: 16-BIT 16kHz MONO WAV ENCODER ---
+  function downsampleBuffer(buffer, inputSampleRate, outputSampleRate) {
+    if (inputSampleRate === outputSampleRate || inputSampleRate < outputSampleRate) {
+      return buffer;
+    }
+    const ratio = inputSampleRate / outputSampleRate;
+    const newLen = Math.round(buffer.length / ratio);
+    const result = new Float32Array(newLen);
+    let offsetResult = 0;
+    let offsetBuffer = 0;
+    while (offsetResult < result.length) {
+      const nextOffsetBuffer = Math.round((offsetResult + 1) * ratio);
+      let accum = 0;
+      let count = 0;
+      for (let i = offsetBuffer; i < nextOffsetBuffer && i < buffer.length; i++) {
+        accum += buffer[i];
+        count++;
+      }
+      result[offsetResult] = count > 0 ? (accum / count) : 0;
+      offsetResult++;
+      offsetBuffer = nextOffsetBuffer;
+    }
+    return result;
+  }
+
+  function encodeWAV(samples, sampleRate) {
+    const buffer = new ArrayBuffer(44 + samples.length * 2);
+    const view = new DataView(buffer);
+
+    function writeStr(offset, str) {
+      for (let i = 0; i < str.length; i++) {
+        view.setUint8(offset + i, str.charCodeAt(i));
+      }
+    }
+
+    writeStr(0, 'RIFF');
+    view.setUint32(4, 36 + samples.length * 2, true);
+    writeStr(8, 'WAVE');
+    writeStr(12, 'fmt ');
+    view.setUint32(16, 16, true);
+    view.setUint16(20, 1, true); // PCM format
+    view.setUint16(22, 1, true); // Mono channel
+    view.setUint32(24, sampleRate, true);
+    view.setUint32(28, sampleRate * 2, true); // byte rate
+    view.setUint16(32, 2, true); // block align
+    view.setUint16(34, 16, true); // 16-bit
+    writeStr(36, 'data');
+    view.setUint32(40, samples.length * 2, true);
+
+    let offset = 44;
+    for (let i = 0; i < samples.length; i++, offset += 2) {
+      const s = Math.max(-1, Math.min(1, samples[i]));
+      view.setInt16(offset, s < 0 ? s * 0x8000 : s * 0x7FFF, true);
+    }
+
+    return new Blob([buffer], { type: 'audio/wav' });
+  }
+
+  function base64ToArrayBuffer(base64) {
+    const commaIdx = base64.indexOf(',');
+    const cleanBase64 = commaIdx >= 0 ? base64.substring(commaIdx + 1) : base64;
+    const binaryString = window.atob(cleanBase64);
+    const len = binaryString.length;
+    const bytes = new Uint8Array(len);
+    for (let i = 0; i < len; i++) {
+      bytes[i] = binaryString.charCodeAt(i);
+    }
+    return bytes.buffer;
+  }
+
+  function playRadioChirp(ctx) {
+    try {
+      const osc = ctx.createOscillator();
+      const gain = ctx.createGain();
+      osc.type = 'sine';
+      const now = ctx.currentTime;
+      osc.frequency.setValueAtTime(880, now);
+      osc.frequency.exponentialRampToValueAtTime(440, now + 0.06);
+      gain.gain.setValueAtTime(0.12, now);
+      gain.gain.exponentialRampToValueAtTime(0.001, now + 0.07);
+      osc.connect(gain);
+      gain.connect(ctx.destination);
+      osc.start(now);
+      osc.stop(now + 0.07);
+    } catch (e) {}
+  }
+
   // VOX Engine: decibel detection and auto-transmission
   async function startVoxEngine() {
     if (voxStream) return;
     try {
-      voxStream = await navigator.mediaDevices.getUserMedia({ audio: true });
-      voxAudioContext = new (window.AudioContext || window.webkitAudioContext)();
+      voxStream = await navigator.mediaDevices.getUserMedia({
+        audio: {
+          echoCancellation: true,
+          noiseSuppression: true,
+          autoGainControl: true
+        }
+      });
+      voxAudioContext = getSharedAudioContext();
+      if (voxAudioContext && voxAudioContext.state === 'suspended') {
+        try { await voxAudioContext.resume(); } catch (e) {}
+      }
       voxSource = voxAudioContext.createMediaStreamSource(voxStream);
       voxAnalyser = voxAudioContext.createAnalyser();
       voxAnalyser.fftSize = 512;
@@ -1362,53 +1490,58 @@ function initEventListeners() {
     }
   }
 
-  // Always On Mode: continuous chunks of 2 seconds
+  // Always On Mode: continuous chunks of 2.5 seconds
   function startAlwaysOnMode() {
     if (state.isMutedByHost) return;
     startPttRecording();
+    clearInterval(alwaysOnInterval);
     alwaysOnInterval = setInterval(() => {
-      if (state.micMode === 'ALWAYS_ON' && !state.isMutedByHost) {
-        stopPttRecording();
-        setTimeout(startPttRecording, 150);
+      if (state.micMode === 'ALWAYS_ON' && !state.isMutedByHost && isRecordingPtt) {
+        flushPcmChunksAndBroadcast();
       }
     }, 2500);
   }
 
-  // Core Audio Recording
+  // Core Audio Recording using Web Audio ScriptProcessorNode (Cross-browser compatible iOS + Android + Desktop)
   async function startPttRecording(existingStream = null) {
     if (isRecordingPtt || state.isMutedByHost) return;
+    const ctx = getSharedAudioContext();
+    if (ctx && ctx.state === 'suspended') {
+      try { await ctx.resume(); } catch (e) {}
+    }
+
     try {
-      const stream = existingStream || await navigator.mediaDevices.getUserMedia({ audio: true });
-      let options = {};
-      if (typeof MediaRecorder !== 'undefined') {
-        if (MediaRecorder.isTypeSupported('audio/webm;codecs=opus')) {
-          options = { mimeType: 'audio/webm;codecs=opus' };
-        } else if (MediaRecorder.isTypeSupported('audio/mp4')) {
-          options = { mimeType: 'audio/mp4' };
+      pttStream = existingStream || await navigator.mediaDevices.getUserMedia({
+        audio: {
+          echoCancellation: true,
+          noiseSuppression: true,
+          autoGainControl: true
         }
+      });
+
+      if (pttSource) {
+        try { pttSource.disconnect(); } catch (e) {}
+      }
+      if (pttProcessor) {
+        try { pttProcessor.disconnect(); } catch (e) {}
       }
 
-      mediaRecorder = new MediaRecorder(stream, options);
-      audioChunks = [];
+      pttSource = ctx.createMediaStreamSource(pttStream);
+      pttProcessor = ctx.createScriptProcessor(4096, 1, 1);
+      pttSilenceGain = ctx.createGain();
+      pttSilenceGain.gain.value = 0; // Prevent feedback echo to speaker
 
-      mediaRecorder.ondataavailable = (e) => {
-        if (e.data && e.data.size > 0) audioChunks.push(e.data);
+      pttPcmChunks = [];
+      pttProcessor.onaudioprocess = (e) => {
+        if (!isRecordingPtt) return;
+        const inputData = e.inputBuffer.getChannelData(0);
+        pttPcmChunks.push(new Float32Array(inputData));
       };
 
-      mediaRecorder.onstop = () => {
-        if (!existingStream) stream.getTracks().forEach(t => t.stop());
-        if (audioChunks.length === 0) return;
+      pttSource.connect(pttProcessor);
+      pttProcessor.connect(pttSilenceGain);
+      pttSilenceGain.connect(ctx.destination);
 
-        const mime = mediaRecorder.mimeType || 'audio/webm';
-        const audioBlob = new Blob(audioChunks, { type: mime });
-        const reader = new FileReader();
-        reader.onloadend = () => {
-          broadcastVoice(reader.result);
-        };
-        reader.readAsDataURL(audioBlob);
-      };
-
-      mediaRecorder.start();
       isRecordingPtt = true;
 
       const pttBtn = document.getElementById('btnPtt');
@@ -1424,14 +1557,39 @@ function initEventListeners() {
     }
   }
 
-  function stopPttRecording() {
-    if (!isRecordingPtt || !mediaRecorder) return;
-    try {
-      if (mediaRecorder.state !== 'inactive') {
-        mediaRecorder.stop();
-      }
-    } catch (e) {}
+  function flushPcmChunksAndBroadcast() {
+    if (!pttPcmChunks || pttPcmChunks.length === 0) return;
+    const chunksToProcess = pttPcmChunks;
+    pttPcmChunks = [];
 
+    const ctx = getSharedAudioContext();
+    const inputSampleRate = (ctx && ctx.sampleRate) ? ctx.sampleRate : 44100;
+    const targetSampleRate = 16000;
+
+    let totalLength = 0;
+    for (let i = 0; i < chunksToProcess.length; i++) totalLength += chunksToProcess[i].length;
+    // Discard tiny noise clicks (<150ms)
+    if (totalLength < inputSampleRate * 0.15) return;
+
+    const merged = new Float32Array(totalLength);
+    let offset = 0;
+    for (let i = 0; i < chunksToProcess.length; i++) {
+      merged.set(chunksToProcess[i], offset);
+      offset += chunksToProcess[i].length;
+    }
+
+    const downsampled = downsampleBuffer(merged, inputSampleRate, targetSampleRate);
+    const wavBlob = encodeWAV(downsampled, targetSampleRate);
+
+    const reader = new FileReader();
+    reader.onloadend = () => {
+      broadcastVoice(reader.result);
+    };
+    reader.readAsDataURL(wavBlob);
+  }
+
+  function stopPttRecording() {
+    if (!isRecordingPtt) return;
     isRecordingPtt = false;
 
     const pttBtn = document.getElementById('btnPtt');
@@ -1440,6 +1598,25 @@ function initEventListeners() {
       pttBtn.className = 'w-16 h-16 rounded-full bg-slate-900/95 hover:bg-slate-800 border-2 border-emerald-500/80 text-emerald-400 shadow-2xl flex flex-col items-center justify-center transition-all transform active:scale-95 group focus:outline-none select-none';
     }
     if (pttInd) pttInd.classList.add('hidden');
+
+    flushPcmChunksAndBroadcast();
+
+    if (pttProcessor) {
+      try {
+        pttProcessor.disconnect();
+        if (pttSource) pttSource.disconnect();
+        if (pttSilenceGain) pttSilenceGain.disconnect();
+      } catch (e) {}
+      pttProcessor = null;
+      pttSource = null;
+    }
+
+    if (pttStream && pttStream !== voxStream) {
+      try {
+        pttStream.getTracks().forEach(t => t.stop());
+      } catch (e) {}
+      pttStream = null;
+    }
   }
 
   function broadcastVoice(audioDataUrl) {
@@ -1457,29 +1634,73 @@ function initEventListeners() {
     state.mqttClient.publish(topicVoice, JSON.stringify(payload));
   }
 
-  function playIncomingVoice(speakerName, audioDataUrl) {
-    const toast = document.getElementById('incomingVoiceToast');
-    const speakerEl = document.getElementById('incomingVoiceSpeaker');
-    if (speakerEl) speakerEl.textContent = `${speakerName}...`;
-    if (toast) toast.classList.remove('hidden');
+  // --- INCOMING VOICE QUEUE & UNIVERSAL PLAYBACK ---
+  const incomingVoiceQueue = [];
+  let isVoicePlaying = false;
 
-    const audio = new Audio(audioDataUrl);
-    audio.play().then(() => {
-      audio.onended = () => {
-        if (toast) toast.classList.add('hidden');
-      };
-    }).catch(e => {
-      console.warn('Audio auto-play caught:', e);
+  function playIncomingVoice(speakerName, audioDataUrl) {
+    incomingVoiceQueue.push({ speakerName, audioDataUrl });
+    if (!isVoicePlaying) {
+      processIncomingVoiceQueue();
+    }
+  }
+
+  async function processIncomingVoiceQueue() {
+    if (incomingVoiceQueue.length === 0) {
+      isVoicePlaying = false;
+      const toast = document.getElementById('incomingVoiceToast');
       if (toast) toast.classList.add('hidden');
-    });
+      return;
+    }
+
+    isVoicePlaying = true;
+    const item = incomingVoiceQueue.shift();
+    const ctx = getSharedAudioContext();
+
+    try {
+      if (ctx && ctx.state === 'suspended') {
+        try { await ctx.resume(); } catch (e) {}
+      }
+
+      if (ctx) playRadioChirp(ctx);
+
+      const arrayBuffer = base64ToArrayBuffer(item.audioDataUrl);
+
+      ctx.decodeAudioData(arrayBuffer, (audioBuffer) => {
+        const source = ctx.createBufferSource();
+        source.buffer = audioBuffer;
+        source.connect(ctx.destination);
+
+        const toast = document.getElementById('incomingVoiceToast');
+        const speakerEl = document.getElementById('incomingVoiceSpeaker');
+        if (speakerEl) speakerEl.textContent = `${item.speakerName}...`;
+        if (toast) toast.classList.remove('hidden');
+
+        source.onended = () => {
+          setTimeout(processIncomingVoiceQueue, 100);
+        };
+
+        source.start(0);
+      }, (err) => {
+        console.warn('decodeAudioData error, attempting fallback:', err);
+        const fallbackAudio = new Audio(item.audioDataUrl);
+        fallbackAudio.onended = () => setTimeout(processIncomingVoiceQueue, 100);
+        fallbackAudio.onerror = () => setTimeout(processIncomingVoiceQueue, 100);
+        fallbackAudio.play().catch(() => setTimeout(processIncomingVoiceQueue, 100));
+      });
+
+    } catch (err) {
+      console.warn('Voice play queue error:', err);
+      setTimeout(processIncomingVoiceQueue, 100);
+    }
   }
 
   // Host Mute application
   function applyHostMute(isMuted) {
     state.isMutedByHost = isMuted;
     if (isMuted) {
-      stopPttRecording();
       clearInterval(alwaysOnInterval);
+      stopPttRecording();
       alert('Mikrofon Anda dimatikan oleh Road Captain / Host.');
     } else {
       alert('Mikrofon Anda telah diaktifkan kembali oleh Road Captain / Host.');
@@ -1494,12 +1715,12 @@ function initEventListeners() {
   let isHoldActive = false;
 
   if (pttButton) {
-    // Touch (Mobile)
+    // Touch (Mobile iOS & Android)
     pttButton.addEventListener('touchstart', (e) => {
       e.preventDefault();
+      unlockGlobalAudio();
       if (state.isMutedByHost) return;
       if (state.micMode === 'ALWAYS_ON') {
-        // Toggle Mute on/off in Always On
         if (isRecordingPtt) stopPttRecording(); else startPttRecording();
         return;
       }
@@ -1508,7 +1729,7 @@ function initEventListeners() {
         isHoldActive = true;
         startPttRecording();
       }, 200);
-    });
+    }, { passive: false });
 
     pttButton.addEventListener('touchend', (e) => {
       e.preventDefault();
@@ -1521,11 +1742,12 @@ function initEventListeners() {
         if (isRecordingPtt) stopPttRecording(); else startPttRecording();
       }
       isHoldActive = false;
-    });
+    }, { passive: false });
 
     // Click/Mouse (Desktop)
     pttButton.addEventListener('mousedown', (e) => {
       e.preventDefault();
+      unlockGlobalAudio();
       if (state.isMutedByHost) return;
       if (state.micMode === 'ALWAYS_ON') {
         if (isRecordingPtt) stopPttRecording(); else startPttRecording();
