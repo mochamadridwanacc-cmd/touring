@@ -1,0 +1,2 @@
+# Aplikasi menggunakan pustaka standar Python (Zero external dependencies)
+# Ringan, cepat, dan hemat resource server cloud.

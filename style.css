@@ -1,0 +1,117 @@
+/* TouringMate Custom Dark HUD Styles */
+@import url('https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700;800&family=JetBrains+Mono:wght@500;700&display=swap');
+
+body {
+  font-family: 'Plus Jakarta Sans', -apple-system, BlinkMacSystemFont, sans-serif;
+  user-select: none;
+  -webkit-user-select: none;
+  touch-action: manipulation;
+}
+
+/* Custom Dark Map Styles for Leaflet */
+.leaflet-tile {
+  filter: brightness(0.65) invert(1) contrast(3) hue-rotate(200deg) saturate(0.3) brightness(0.7);
+}
+
+.leaflet-container {
+  background: #090d16 !important;
+}
+
+/* Custom Map Markers */
+.custom-rider-marker {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  transform: translate(-50%, -100%);
+  transition: transform 0.3s ease;
+}
+
+.marker-pin {
+  width: 38px;
+  height: 38px;
+  border-radius: 50% 50% 50% 0;
+  transform: rotate(-45deg);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  box-shadow: 0 4px 14px rgba(0, 0, 0, 0.5);
+  border: 2px solid #ffffff;
+}
+
+.marker-pin-inner {
+  transform: rotate(45deg);
+  font-size: 11px;
+  font-weight: 800;
+  color: #0f172a;
+}
+
+.marker-label {
+  margin-top: 4px;
+  padding: 2px 6px;
+  background: rgba(15, 23, 42, 0.9);
+  border: 1px solid rgba(255, 255, 255, 0.15);
+  border-radius: 6px;
+  font-size: 10px;
+  font-weight: 700;
+  color: #f8fafc;
+  white-space: nowrap;
+  box-shadow: 0 2px 6px rgba(0, 0, 0, 0.4);
+}
+
+/* Leader, Sweeper, Self color themes */
+.marker-self .marker-pin {
+  background: #f59e0b; /* Amber */
+  border-color: #fef08a;
+}
+.marker-leader .marker-pin {
+  background: #3b82f6; /* Blue */
+  border-color: #93c5fd;
+}
+.marker-sweeper .marker-pin {
+  background: #ef4444; /* Red */
+  border-color: #fca5a5;
+}
+.marker-member .marker-pin {
+  background: #10b981; /* Emerald */
+  border-color: #a7f3d0;
+}
+
+/* Pulsing radar effect for self */
+.pulse-circle {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  width: 48px;
+  height: 48px;
+  background: rgba(245, 158, 11, 0.3);
+  border-radius: 50%;
+  transform: translate(-50%, -50%);
+  animation: radar-pulse 2s infinite ease-out;
+  pointer-events: none;
+}
+
+@keyframes radar-pulse {
+  0% {
+    transform: translate(-50%, -50%) scale(0.5);
+    opacity: 0.8;
+  }
+  100% {
+    transform: translate(-50%, -50%) scale(2.2);
+    opacity: 0;
+  }
+}
+
+/* Scrollbar tweaks */
+::-webkit-scrollbar {
+  width: 5px;
+}
+::-webkit-scrollbar-track {
+  background: #0f172a;
+}
+::-webkit-scrollbar-thumb {
+  background: #334155;
+  border-radius: 4px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: #475569;
+}
