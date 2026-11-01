@@ -81,7 +81,9 @@ document.addEventListener('DOMContentLoaded', async () => {
   initGeolocation();
   initWakeLock();
   initEventListeners();
+  initVoiceIntercom();
   initAudioContextUnlock();
+  startCamera();
 
   // Check for HTTPS on mobile devices
   if (location.protocol !== 'https:' && location.hostname !== 'localhost' && location.hostname !== '127.0.0.1') {
@@ -260,7 +262,13 @@ function initCloudMqtt() {
 
         // Ignore self-broadcasts using guaranteed unique clientId or profile id
         const isSelf = (msg.senderClientId && msg.senderClientId === state.mqttClientId) ||
-                       (msg.senderId && myId && msg.senderId === myId);
+                       (msg.senderId && myId && msg.senderId === myId) ||
+                       (msg.id && myId && msg.id === myId);
+
+        const appendChatFn = window.appendChatMessage || (typeof appendChatMessage === 'function' ? appendChatMessage : null);
+        const showToastFn = window.showIncomingTextToast || (typeof showIncomingTextToast === 'function' ? showIncomingTextToast : null);
+        const playVoiceFn = window.playIncomingVoice || (typeof playIncomingVoice === 'function' ? playIncomingVoice : null);
+        const applyMuteFn = window.applyHostMute || (typeof applyHostMute === 'function' ? applyHostMute : null);
 
         if (topic.endsWith('/loc')) {
           if (msg && msg.id && !isSelf) {
@@ -269,34 +277,51 @@ function initCloudMqtt() {
             refreshCloudConvoy();
           }
         } else if (topic.endsWith('/chat')) {
-          console.log('[MQTT Chat] Received text:', msg, 'isSelf:', isSelf);
+          console.log('[MQTT Chat] Inbound text message:', msg, 'isSelf:', isSelf);
           if (msg && msg.text && !isSelf) {
-            appendChatMessage({
-              id: 'chat-' + Date.now(),
-              type: 'chat_in',
-              senderName: msg.senderName || 'Rider',
-              text: msg.text,
-              time: new Date().toLocaleTimeString('id-ID', { hour: '2-digit', minute: '2-digit', second: '2-digit' })
-            });
-            showIncomingTextToast(msg.senderName || 'Rider', msg.text);
+            if (appendChatFn) {
+              appendChatFn({
+                id: 'chat-' + Date.now(),
+                type: 'chat_in',
+                senderName: msg.senderName || 'Rider',
+                text: msg.text,
+                time: new Date().toLocaleTimeString('id-ID', { hour: '2-digit', minute: '2-digit', second: '2-digit' })
+              });
+            }
+            if (showToastFn) {
+              showToastFn(msg.senderName || 'Rider', msg.text);
+            }
           }
         } else if (topic.endsWith('/voice')) {
-          console.log('[MQTT Voice] Received voice from:', msg.senderName, 'isSelf:', isSelf);
+          console.log('[MQTT Voice] Inbound audio message from:', msg.senderName, 'isSelf:', isSelf);
           if (msg && msg.audio && !isSelf) {
             const sizeKB = Math.round(msg.audio.length * 0.75 / 1024);
-            appendChatMessage({
-              id: 'voice-' + Date.now(),
-              type: 'voice_in',
-              senderName: msg.senderName || 'Rider',
-              sizeKB,
-              audio: msg.audio,
-              time: new Date().toLocaleTimeString('id-ID', { hour: '2-digit', minute: '2-digit', second: '2-digit' })
-            });
-            playIncomingVoice(msg.senderName || 'Rider', msg.audio);
+            if (appendChatFn) {
+              appendChatFn({
+                id: 'voice-' + Date.now(),
+                type: 'voice_in',
+                senderName: msg.senderName || 'Rider',
+                sizeKB,
+                audio: msg.audio,
+                time: new Date().toLocaleTimeString('id-ID', { hour: '2-digit', minute: '2-digit', second: '2-digit' })
+              });
+            }
+            if (playVoiceFn) {
+              playVoiceFn(msg.senderName || 'Rider', msg.audio);
+            }
           }
         } else if (topic.endsWith('/ping')) {
-          if (msg && msg.pingId && !isSelf) {
-            showIncomingTextToast(msg.senderName || 'Rider', '⚡ Mengirim Ping Koneksi!');
+          console.log('[MQTT Ping] Inbound ping:', msg);
+          if (msg && msg.pingNonce) {
+            if (msg.senderClientId === state.mqttClientId && state.pendingPing && state.pendingPing.nonce === msg.pingNonce) {
+              const rtt = Date.now() - state.pendingPing.startTime;
+              state.pendingPing = null;
+              alert(`⚡ Ping Berhasil!\nBroker: ${state.mqttBrokerName}\nLatency Round-Trip Asli: ${rtt} ms\nRoom: ${state.roomCode}`);
+            } else if (msg.senderClientId !== state.mqttClientId) {
+              if (showToastFn) {
+                showToastFn(msg.senderName || 'Rider', `⚡ Mengirim Ping Koneksi (${msg.senderName})!`);
+              }
+            }
           }
         } else if (topic.endsWith('/ctl')) {
           if (msg.action === 'delete') {
@@ -310,21 +335,21 @@ function initCloudMqtt() {
             updateMapMarkers();
             renderRoster();
           } else if (msg.action === 'mute_rider') {
-            if (msg.targetId === myId) {
-              applyHostMute(!!msg.muted);
+            if (msg.targetId === myId && applyMuteFn) {
+              applyMuteFn(!!msg.muted);
             }
             if (state.activeCloudRiders[msg.targetId]) {
               state.activeCloudRiders[msg.targetId].isMutedByHost = !!msg.muted;
               refreshCloudConvoy();
             }
           } else if (msg.action === 'mute_all') {
-            if (!state.myProfile?.isMaster) {
-              applyHostMute(!!msg.muted);
+            if (!state.myProfile?.isMaster && applyMuteFn) {
+              applyMuteFn(!!msg.muted);
             }
           }
         }
       } catch (e) {
-        console.warn('MQTT parse error:', e);
+        console.error('[MQTT Message Handler Error]:', e);
       }
     });
   } catch (err) {
@@ -493,6 +518,8 @@ async function syncWithServer(customAction = 'update', extraData = {}) {
   if (state.mqttClient && state.mqttClient.connected) {
     if (customAction === 'update' && state.myProfile) {
       const myData = {
+        senderClientId: state.mqttClientId,
+        senderId: state.myProfile.id,
         id: state.myProfile.id,
         name: state.myProfile.name,
         plate: state.myProfile.plate,
@@ -2309,23 +2336,33 @@ function initEventListeners() {
     const cleanRoom = (state.roomCode || 'TOURING-1').replace(/[^A-Z0-9_-]/gi, '');
     const topicPing = `touringmate/rooms/${cleanRoom}/ping`;
     const t0 = Date.now();
+    const pingNonce = 'ping-' + t0 + '-' + Math.random().toString(36).substring(2, 6);
+    state.pendingPing = { nonce: pingNonce, startTime: t0 };
+
     const myName = state.myProfile ? state.myProfile.name : 'Saya';
 
     const payload = {
       senderClientId: state.mqttClientId,
       senderName: myName,
-      pingId: 'ping-' + t0,
+      pingNonce,
       timestamp: t0
     };
 
+    console.log('[MQTT Ping] Sending ping with nonce:', pingNonce);
     state.mqttClient.publish(topicPing, JSON.stringify(payload), { qos: 0 }, (err) => {
       if (err) {
-        alert('Ping gagal: ' + err.message);
-      } else {
-        const pingTime = Date.now() - t0;
-        alert(`⚡ Ping Berhasil!\nBroker: ${state.mqttBrokerName}\nLatency respon: ~${pingTime} ms\nRoom: ${state.roomCode}`);
+        alert('Gagal mengirim ping: ' + err.message);
+        state.pendingPing = null;
       }
     });
+
+    setTimeout(() => {
+      if (state.pendingPing && state.pendingPing.nonce === pingNonce) {
+        state.pendingPing = null;
+        alert(`⚠️ Ping timeout (4 detik). Broker ${state.mqttBrokerName} belum merespon. Menghubungkan ulang...`);
+        tryNextBroker();
+      }
+    }, 4000);
   }
 
   function sendSyntheticBeep() {
@@ -2397,6 +2434,15 @@ function initEventListeners() {
       }
     }
   });
+
+  // Expose global intercom & chat functions so initCloudMqtt and other handlers can access them
+  window.appendChatMessage = appendChatMessage;
+  window.playIncomingVoice = playIncomingVoice;
+  window.showIncomingTextToast = showIncomingTextToast;
+  window.applyHostMute = applyHostMute;
+  window.broadcastTextMessage = broadcastTextMessage;
+  window.broadcastVoice = broadcastVoice;
+  window.sendPingTest = sendPingTest;
 
   // Auto-start VOX engine if saved
   if (state.micMode === 'VOX') startVoxEngine();
