@@ -101,19 +101,24 @@ function initCloudMqtt() {
   const urlParams = new URLSearchParams(window.location.search);
   if (urlParams.get('room')) {
     state.roomCode = urlParams.get('room').toUpperCase();
+    localStorage.setItem('touring_room', state.roomCode);
+  } else {
+    const savedRoom = localStorage.getItem('touring_room');
+    if (savedRoom) state.roomCode = savedRoom.toUpperCase();
   }
 
-  const cleanRoom = state.roomCode.replace(/[^A-Z0-9_-]/gi, '');
+  const cleanRoom = (state.roomCode || 'TOURING-1').replace(/[^A-Z0-9_-]/gi, '');
   const topicLocation = `touringmate/rooms/${cleanRoom}/loc`;
   const topicControl = `touringmate/rooms/${cleanRoom}/ctl`;
 
   try {
-    const clientId = 'tm-' + Math.random().toString(16).substring(2, 8);
+    const clientId = 'tm-' + Date.now() + '-' + Math.random().toString(36).substring(2, 9);
     state.mqttClient = mqtt.connect('wss://broker.emqx.io:8084/mqtt', {
       clientId,
       clean: true,
-      connectTimeout: 5000,
-      reconnectPeriod: 3000
+      connectTimeout: 7000,
+      reconnectPeriod: 2500,
+      keepalive: 30
     });
 
     state.mqttClient.on('connect', () => {
@@ -133,14 +138,14 @@ function initCloudMqtt() {
         const msg = JSON.parse(payload.toString());
         const myId = state.myProfile ? state.myProfile.id : null;
 
-        if (topic === topicLocation) {
+        if (topic.endsWith('/loc')) {
           // Received live location update from another rider
           if (msg && msg.id && msg.id !== myId) {
             msg.lastSeen = Date.now();
             state.activeCloudRiders[msg.id] = msg;
             refreshCloudConvoy();
           }
-        } else if (topic === topicControl) {
+        } else if (topic.endsWith('/ctl')) {
           // Received control command from Master
           if (msg.action === 'delete') {
             delete state.activeCloudRiders[msg.targetId];
@@ -166,6 +171,30 @@ function initCloudMqtt() {
   } catch (err) {
     console.warn('MQTT connection notice:', err);
   }
+}
+
+function switchCloudRoom(newRoomCode) {
+  if (!state.mqttClient || !state.mqttClient.connected) {
+    state.roomCode = newRoomCode;
+    return;
+  }
+  const cleanOld = (state.roomCode || 'TOURING-1').replace(/[^A-Z0-9_-]/gi, '');
+  const cleanNew = (newRoomCode || 'TOURING-1').replace(/[^A-Z0-9_-]/gi, '');
+
+  state.mqttClient.unsubscribe([`touringmate/rooms/${cleanOld}/loc`, `touringmate/rooms/${cleanOld}/ctl`]);
+  state.roomCode = cleanNew;
+  state.activeCloudRiders = {};
+  state.riders = [];
+  updateMapMarkers();
+  renderRoster();
+
+  state.mqttClient.subscribe([`touringmate/rooms/${cleanNew}/loc`, `touringmate/rooms/${cleanNew}/ctl`], () => {
+    const syncInd = document.getElementById('serverSyncIndicator');
+    if (syncInd) {
+      syncInd.innerHTML = `<span class="w-1.5 h-1.5 rounded-full bg-emerald-500 animate-pulse"></span> Cloud Live (${state.roomCode})`;
+    }
+    syncWithServer('update');
+  });
 }
 
 function refreshCloudConvoy() {
@@ -397,8 +426,8 @@ function updateMapMarkers() {
 
   // 2. Convoy Markers
   state.riders.forEach(rider => {
-    const riderLat = state.myCoords.lat + (rider.latOffset || 0);
-    const riderLng = state.myCoords.lng + (rider.lngOffset || 0);
+    const riderLat = (rider.lat !== undefined && rider.lat !== null) ? rider.lat : (state.myCoords.lat + (rider.latOffset || 0));
+    const riderLng = (rider.lng !== undefined && rider.lng !== null) ? rider.lng : (state.myCoords.lng + (rider.lngOffset || 0));
     const riderPos = [riderLat, riderLng];
 
     const roleClass = rider.role === 'LEADER' ? 'marker-leader' : (rider.role === 'SWEEPER' ? 'marker-sweeper' : 'marker-member');
@@ -501,10 +530,10 @@ function renderRoster() {
 
   // Calculate distance for each rider relative to me
   const processedRiders = state.riders.map(rider => {
-    const rLat = state.myCoords.lat + (rider.latOffset || 0);
-    const rLng = state.myCoords.lng + (rider.lngOffset || 0);
+    const rLat = (rider.lat !== undefined && rider.lat !== null) ? rider.lat : (state.myCoords.lat + (rider.latOffset || 0));
+    const rLng = (rider.lng !== undefined && rider.lng !== null) ? rider.lng : (state.myCoords.lng + (rider.lngOffset || 0));
     const dist = calculateDistanceMeters(state.myCoords.lat, state.myCoords.lng, rLat, rLng);
-    const isAhead = (rider.latOffset || 0) >= 0;
+    const isAhead = (rider.lat !== undefined && rider.lat !== null) ? (rider.lat >= state.myCoords.lat) : ((rider.latOffset || 0) >= 0);
     return { ...rider, distance: dist, isAhead };
   });
 
@@ -939,8 +968,11 @@ function initEventListeners() {
     e.preventDefault();
     const isMasterSelected = document.getElementById('modeMaster') ? document.getElementById('modeMaster').checked : false;
     const roomInput = document.getElementById('inputRoomCode');
-    if (roomInput && roomInput.value.trim()) {
-      state.roomCode = roomInput.value.trim().toUpperCase();
+    const newRoom = roomInput ? roomInput.value.trim().toUpperCase() : 'TOURING-1';
+    if (newRoom && newRoom !== state.roomCode) {
+      localStorage.setItem('touring_room', newRoom);
+      switchCloudRoom(newRoom);
+    } else {
       localStorage.setItem('touring_room', state.roomCode);
     }
     const profile = {
