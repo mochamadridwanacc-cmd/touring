@@ -6,6 +6,9 @@
 // Application State
 const state = {
   myProfile: null,
+  roomCode: 'TOURING-1',
+  mqttClient: null,
+  activeCloudRiders: {},
   myCoords: { lat: -6.200000, lng: 106.816666, speed: 0, heading: 0 },
   riders: [],
   map: null,
@@ -80,9 +83,115 @@ document.addEventListener('DOMContentLoaded', async () => {
   }
 
   // Start Realtime Background Sync with Server (MacBook <-> iPhone)
+  initCloudMqtt();
   syncWithServer();
   setInterval(syncWithServer, 2000);
 });
+
+/* ==========================================================================
+   CLOUD REAL-TIME SYNC VIA SECURE WEBSOCKET MQTT (ZERO SERVER / STATIC WEB)
+   ========================================================================== */
+function initCloudMqtt() {
+  if (typeof mqtt === 'undefined') {
+    console.warn('MQTT client library not loaded, using fallback HTTP sync');
+    return;
+  }
+
+  // Check URL query param for room e.g. ?room=BROMO
+  const urlParams = new URLSearchParams(window.location.search);
+  if (urlParams.get('room')) {
+    state.roomCode = urlParams.get('room').toUpperCase();
+  }
+
+  const cleanRoom = state.roomCode.replace(/[^A-Z0-9_-]/gi, '');
+  const topicLocation = `touringmate/rooms/${cleanRoom}/loc`;
+  const topicControl = `touringmate/rooms/${cleanRoom}/ctl`;
+
+  try {
+    const clientId = 'tm-' + Math.random().toString(16).substring(2, 8);
+    state.mqttClient = mqtt.connect('wss://broker.emqx.io:8084/mqtt', {
+      clientId,
+      clean: true,
+      connectTimeout: 5000,
+      reconnectPeriod: 3000
+    });
+
+    state.mqttClient.on('connect', () => {
+      console.log('Connected to Cloud Realtime MQTT!');
+      state.mqttClient.subscribe([topicLocation, topicControl], () => {
+        const syncInd = document.getElementById('serverSyncIndicator');
+        if (syncInd) {
+          syncInd.innerHTML = `<span class="w-1.5 h-1.5 rounded-full bg-emerald-500 animate-pulse"></span> Cloud Live (${state.roomCode})`;
+        }
+        // Send initial heartbeat immediately upon connect
+        syncWithServer('update');
+      });
+    });
+
+    state.mqttClient.on('message', (topic, payload) => {
+      try {
+        const msg = JSON.parse(payload.toString());
+        const myId = state.myProfile ? state.myProfile.id : null;
+
+        if (topic === topicLocation) {
+          // Received live location update from another rider
+          if (msg && msg.id && msg.id !== myId) {
+            msg.lastSeen = Date.now();
+            state.activeCloudRiders[msg.id] = msg;
+            refreshCloudConvoy();
+          }
+        } else if (topic === topicControl) {
+          // Received control command from Master
+          if (msg.action === 'delete') {
+            delete state.activeCloudRiders[msg.targetId];
+            state.riders = state.riders.filter(r => r.id !== msg.targetId);
+            updateMapMarkers();
+            renderRoster();
+          } else if (msg.action === 'clear') {
+            state.activeCloudRiders = {};
+            state.riders = [];
+            updateMapMarkers();
+            renderRoster();
+          } else if (msg.action === 'set_convoy' && Array.isArray(msg.convoyList)) {
+            msg.convoyList.forEach(r => {
+              if (r.id !== myId) state.activeCloudRiders[r.id] = r;
+            });
+            refreshCloudConvoy();
+          }
+        }
+      } catch (e) {
+        console.warn('MQTT parse error:', e);
+      }
+    });
+  } catch (err) {
+    console.warn('MQTT connection notice:', err);
+  }
+}
+
+function refreshCloudConvoy() {
+  const now = Date.now();
+  // Filter out riders inactive for > 90 seconds (unless marked isDummy)
+  const validRiders = [];
+  Object.keys(state.activeCloudRiders).forEach(id => {
+    const r = state.activeCloudRiders[id];
+    if (r.isDummy || (now - (r.lastSeen || now)) < 90000) {
+      validRiders.push(r);
+    } else {
+      delete state.activeCloudRiders[id];
+    }
+  });
+
+  const myId = state.myProfile ? state.myProfile.id : null;
+  state.riders = validRiders.filter(r => r.id !== myId);
+  updateMapMarkers();
+  renderRoster();
+
+  const syncInd = document.getElementById('serverSyncIndicator');
+  if (syncInd) {
+    const count = state.riders.length + 1;
+    syncInd.innerHTML = `<span class="w-1.5 h-1.5 rounded-full bg-emerald-500 animate-pulse"></span> Cloud Live (${count} Rider)`;
+  }
+}
 
 /* ==========================================================================
    1. USER PROFILE, DEVICE ROLE (MASTER / PESERTA) & REALTIME SYNC
@@ -137,8 +246,44 @@ function updateProfileUI() {
   }
 }
 
-// Real-time synchronization loop with server (Shared across MacBook & iPhone)
+// Real-time synchronization loop with server & Cloud MQTT
 async function syncWithServer(customAction = 'update', extraData = {}) {
+  const cleanRoom = (state.roomCode || 'TOURING-1').replace(/[^A-Z0-9_-]/gi, '');
+  const topicLocation = `touringmate/rooms/${cleanRoom}/loc`;
+  const topicControl = `touringmate/rooms/${cleanRoom}/ctl`;
+
+  // 1. Broadcast over Cloud MQTT (Works 100% on Static Sites like GitHub Pages!)
+  if (state.mqttClient && state.mqttClient.connected) {
+    if (customAction === 'update' && state.myProfile) {
+      const myData = {
+        id: state.myProfile.id,
+        name: state.myProfile.name,
+        plate: state.myProfile.plate,
+        vehicle: state.myProfile.vehicle,
+        role: state.myProfile.role,
+        isMaster: !!state.myProfile.isMaster,
+        lat: state.myCoords.lat,
+        lng: state.myCoords.lng,
+        speed: state.myCoords.speed,
+        heading: state.myCoords.heading,
+        isDummy: false
+      };
+      state.mqttClient.publish(topicLocation, JSON.stringify(myData));
+    } else if (customAction !== 'update') {
+      // Broadcast control command (Master delete, clear, or set dummy)
+      state.mqttClient.publish(topicControl, JSON.stringify({
+        action: customAction,
+        targetId: extraData.targetId || null,
+        convoyList: extraData.convoyList || null
+      }));
+    }
+  }
+
+  // 2. Also sync with local Python server if running on localhost / custom backend
+  if (location.hostname.endsWith('github.io')) {
+    return; // Static GitHub Pages purely uses Cloud MQTT
+  }
+
   const payload = {
     action: customAction,
     targetId: extraData.targetId || null,
@@ -777,6 +922,9 @@ function initEventListeners() {
       document.getElementById('inputPlate').value = state.myProfile.plate;
       document.getElementById('inputVehicle').value = state.myProfile.vehicle;
       document.getElementById('inputRole').value = state.myProfile.role;
+      if (document.getElementById('inputRoomCode')) {
+        document.getElementById('inputRoomCode').value = state.roomCode || 'TOURING-1';
+      }
       if (document.getElementById('modeMaster')) {
         document.getElementById('modeMaster').checked = !!state.myProfile.isMaster;
         document.getElementById('modePeserta').checked = !state.myProfile.isMaster;
@@ -790,6 +938,11 @@ function initEventListeners() {
   document.getElementById('profileForm').addEventListener('submit', (e) => {
     e.preventDefault();
     const isMasterSelected = document.getElementById('modeMaster') ? document.getElementById('modeMaster').checked : false;
+    const roomInput = document.getElementById('inputRoomCode');
+    if (roomInput && roomInput.value.trim()) {
+      state.roomCode = roomInput.value.trim().toUpperCase();
+      localStorage.setItem('touring_room', state.roomCode);
+    }
     const profile = {
       id: state.myProfile?.id || ('rider-' + Math.random().toString(36).substring(2, 9)),
       name: document.getElementById('inputName').value.trim(),
@@ -895,8 +1048,9 @@ function initEventListeners() {
   const shareInput = document.getElementById('shareUrlInput');
 
   function openQrModal() {
-    // Current URL (e.g. https://192.168.110.17:1214)
-    const joinUrl = window.location.origin + window.location.pathname;
+    // Current URL with Room parameter (e.g. https://domain.com/?room=TOURING-1)
+    const base = window.location.origin + window.location.pathname;
+    const joinUrl = `${base}?room=${encodeURIComponent(state.roomCode || 'TOURING-1')}`;
     shareInput.value = joinUrl;
 
     // Clear previous QR
