@@ -1679,8 +1679,17 @@ function initEventListeners() {
       pttBtn.className = 'w-16 h-16 rounded-full bg-rose-600 border-4 border-rose-300 text-white shadow-2xl flex flex-col items-center justify-center transition-all transform scale-110 select-none animate-pulse';
       pttLabel.textContent = 'REC...';
     } else if (state.micMode === 'ALWAYS_ON') {
-      pttBtn.className = 'w-16 h-16 rounded-full bg-emerald-600 border-2 border-emerald-300 text-white shadow-2xl flex flex-col items-center justify-center transition-all select-none animate-pulse';
-      pttLabel.textContent = 'RADIO';
+      if (typeof isRadioTalkingActive !== 'undefined' && isRadioTalkingActive) {
+        // MERAH: Tanda Ngomong Terus
+        pttBtn.className = 'w-16 h-16 rounded-full bg-rose-600 border-4 border-rose-300 text-white shadow-2xl flex flex-col items-center justify-center transition-all animate-pulse transform scale-105 select-none';
+        pttBtn.title = 'Sedang Bicara Terus (Klik untuk Berhenti Ngobrol)';
+        pttLabel.textContent = 'TALK 🔴';
+      } else {
+        // HIJAU: Tanda Berhenti Ngobrol (Standby)
+        pttBtn.className = 'w-16 h-16 rounded-full bg-slate-900/95 hover:bg-slate-800 border-2 border-emerald-500 text-emerald-400 shadow-xl flex flex-col items-center justify-center transition-all select-none';
+        pttBtn.title = 'Mode Radio Standby (Klik Sekali untuk Ngomong Terus)';
+        pttLabel.textContent = 'RADIO 🟢';
+      }
     } else if (state.micMode === 'VOX') {
       pttBtn.className = 'w-16 h-16 rounded-full bg-cyan-950/90 border-2 border-cyan-400 text-cyan-300 shadow-2xl flex flex-col items-center justify-center transition-all select-none';
       pttLabel.textContent = 'VOX AUTO';
@@ -1916,6 +1925,7 @@ function initEventListeners() {
   let radioCountdownTimer = null;
   let radioSecondsRemaining = 600; // 10 menit = 600 detik
   const RADIO_CYCLE_SECONDS = 600;
+  let isRadioTalkingActive = false; // true = MERAH (ngomong terus), false = HIJAU (berhenti ngobrol)
 
   function updateRadioTimerUI() {
     const badge = document.getElementById('radioTimerBadge');
@@ -1932,19 +1942,8 @@ function initEventListeners() {
     }
   }
 
-  // Radio Hands-Free Mode: continuous streaming with auto-reset & auto-reopen every 10 minutes
-  function startAlwaysOnMode() {
-    if (state.isMutedByHost) return;
-    startPttRecording();
-    clearInterval(alwaysOnInterval);
-    alwaysOnInterval = setInterval(() => {
-      if (state.micMode === 'ALWAYS_ON' && !state.isMutedByHost && isRecordingPtt) {
-        flushPcmChunksAndBroadcast();
-      }
-    }, 2500);
-
-    // Mulai hitung mundur 10 menit (Auto-reset per 10 menit & auto reopen)
-    if (radioCountdownTimer) clearInterval(radioCountdownTimer);
+  function startRadio10MinCountdown() {
+    if (radioCountdownTimer) return;
     radioSecondsRemaining = RADIO_CYCLE_SECONDS;
     updateRadioTimerUI();
 
@@ -1960,20 +1959,60 @@ function initEventListeners() {
       updateRadioTimerUI();
 
       if (radioSecondsRemaining <= 0) {
-        // Auto-reset buffer audio & auto-reopen immediately!
-        console.log('[Radio Hands-Free] 10 menit tercapai. Mereset buffer & membuka otomatis kembali...');
+        // Auto-reset buffer audio per 10 menit & auto reopen immediately!
+        console.log('[Radio Hands-Free] 10 menit tercapai. Mereset buffer audio...');
         showPttToast('♻️ Audio Reset 10m', 1500);
 
-        stopPttRecording();
-        setTimeout(() => {
+        if (isRadioTalkingActive && isRecordingPtt) {
+          stopPttRecording();
+          setTimeout(() => {
+            radioSecondsRemaining = RADIO_CYCLE_SECONDS;
+            if (state.micMode === 'ALWAYS_ON' && isRadioTalkingActive && !state.isMutedByHost) {
+              startPttRecording();
+              console.log('[Radio Hands-Free] Berhasil terbuka otomatis kembali untuk 10 menit berikutnya!');
+            }
+          }, 150);
+        } else {
           radioSecondsRemaining = RADIO_CYCLE_SECONDS;
-          if (state.micMode === 'ALWAYS_ON' && !state.isMutedByHost) {
-            startPttRecording();
-            console.log('[Radio Hands-Free] Berhasil terbuka otomatis kembali untuk 10 menit berikutnya!');
-          }
-        }, 150);
+        }
       }
     }, 1000);
+  }
+
+  // Radio Hands-Free Mode: Mulai dalam kondisi STANDBY (HIJAU 🟢)
+  function startAlwaysOnMode() {
+    isRadioTalkingActive = false;
+    if (isRecordingPtt) stopPttRecording();
+    clearInterval(alwaysOnInterval);
+    startRadio10MinCountdown();
+    updatePttButtonUI();
+    showPttToast('📻 Mode Hands-Free (Klik Tombol untuk Bicara)', 2500);
+  }
+
+  // Klik sekali jadi MERAH tanda ngomong terus
+  function startRadioTalking() {
+    if (state.isMutedByHost) return;
+    isRadioTalkingActive = true;
+    startPttRecording();
+    showPttToast('🎙️ NGOMONG TERUS (MERAH)', 0);
+
+    clearInterval(alwaysOnInterval);
+    alwaysOnInterval = setInterval(() => {
+      if (state.micMode === 'ALWAYS_ON' && isRadioTalkingActive && isRecordingPtt && !state.isMutedByHost) {
+        flushPcmChunksAndBroadcast();
+      }
+    }, 2500);
+
+    updatePttButtonUI();
+  }
+
+  // Klik lagi jadi HIJAU tanda berhenti ngobrol
+  function stopRadioTalking() {
+    isRadioTalkingActive = false;
+    clearInterval(alwaysOnInterval);
+    stopPttRecording();
+    showPttToast('✅ Berhenti Ngobrol (HIJAU)', 1800);
+    updatePttButtonUI();
   }
 
   // Core Audio Recording using Web Audio ScriptProcessorNode (Cross-browser compatible iOS + Android + Desktop)
@@ -2305,8 +2344,13 @@ function initEventListeners() {
     unlockGlobalAudio();
     if (state.isMutedByHost) return;
 
+    // Saat mode Hands-Free: klik sekali jadi merah tanda ngomong terus, klik lagi jadi hijau berhenti ngobrol
     if (state.micMode === 'ALWAYS_ON') {
-      if (isRecordingPtt) stopPttRecording(); else startPttRecording();
+      if (isRadioTalkingActive || isRecordingPtt) {
+        stopRadioTalking();
+      } else {
+        startRadioTalking();
+      }
       return;
     }
 
