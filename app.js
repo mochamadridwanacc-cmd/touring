@@ -11,6 +11,7 @@ const state = {
   activeCloudRiders: {},
   myCoords: { lat: -6.200000, lng: 106.816666, speed: 0, heading: 0 },
   riders: [],
+  activeSpeakerUntil: {},
   map: null,
   mapMarkers: {},
   wakeLock: null,
@@ -304,6 +305,11 @@ function initCloudMqtt() {
             if (!voiceTimestamp || voiceAgeMs > 30000 || voiceAgeMs < -5000) {
               console.log('[MQTT Voice] Ignored stale retained transmission');
               return;
+            }
+            const speakerId = msg.senderId || msg.senderClientId;
+            if (speakerId) {
+              state.activeSpeakerUntil[speakerId] = Date.now() + 4000;
+              renderRoster();
             }
             const sizeKB = Math.round(msg.audio.length * 0.75 / 1024);
             if (appendChatFn) {
@@ -1282,6 +1288,7 @@ function renderLeftHUD(processedRiders) {
       subClass = 'text-amber-400 font-bold';
     }
 
+    const isSpeaking = (state.activeSpeakerUntil[rider.id] || 0) > Date.now();
     const row = document.createElement('div');
     row.className = `cursor-pointer flex items-center justify-between px-2 py-1 rounded-lg ${isOffline ? 'bg-rose-950/20' : 'bg-black/15'} hover:bg-black/35 backdrop-blur-[2px] text-slate-200 transition active:scale-[0.98] group [text-shadow:_0_1px_3px_rgb(0_0_0_/_90%)]`;
     row.title = `Klik untuk lihat posisi ${rider.name} (${rider.plate}) di peta ${isOffline ? '(Titik Terakhir Terpantau)' : ''}`;
@@ -1290,11 +1297,27 @@ function renderLeftHUD(processedRiders) {
         <span class="w-1.5 h-1.5 rounded-full ${dotClass} flex-shrink-0"></span>
         <span class="px-1 py-0.2 rounded text-[9px] font-bold ${rRoleColor}">${rRoleTag}</span>
         <span class="font-medium text-xs truncate ${textClass} transition">${rider.name}</span>
+        ${isSpeaking ? '<span class="text-emerald-300 animate-pulse flex-shrink-0" title="Sedang bicara"><i data-lucide="volume-2" class="w-3.5 h-3.5"></i></span>' : ''}
+        ${state.myProfile?.isMaster ? `<button type="button" class="btn-mute-rider-hud p-0.5 rounded text-slate-300 hover:text-rose-300 transition flex-shrink-0" data-id="${rider.id}" title="${rider.isMutedByHost ? 'Buka mic rider' : 'Matikan mic rider'}" aria-label="${rider.isMutedByHost ? 'Buka mic rider' : 'Matikan mic rider'}"><i data-lucide="${rider.isMutedByHost ? 'mic-off' : 'mic'}" class="w-3.5 h-3.5 pointer-events-none ${rider.isMutedByHost ? 'text-rose-400' : ''}"></i></button>` : ''}
       </div>
       <div class="flex items-center gap-1 flex-shrink-0">
         <span class="font-mono text-[10px] ${subClass}">${subInfo}</span>
       </div>
     `;
+    row.querySelector('.btn-mute-rider-hud')?.addEventListener('click', (event) => {
+      event.stopPropagation();
+      const newMuted = !rider.isMutedByHost;
+      const cleanRoom = (state.roomCode || 'TOURING-1').replace(/[^A-Z0-9_-]/gi, '');
+      if (state.mqttClient && state.mqttClient.connected) {
+        state.mqttClient.publish(`touringmate/rooms/${cleanRoom}/ctl`, JSON.stringify({
+          action: 'mute_rider', targetId: rider.id, muted: newMuted
+        }));
+      }
+      if (state.activeCloudRiders[rider.id]) state.activeCloudRiders[rider.id].isMutedByHost = newMuted;
+      const currentRider = state.riders.find(item => item.id === rider.id);
+      if (currentRider) currentRider.isMutedByHost = newMuted;
+      renderRoster();
+    });
     row.addEventListener('click', () => {
       if (state.map && rider.lat !== undefined && rider.lng !== undefined) {
         state.map.setView([rider.lat, rider.lng], 17, { animate: true });
@@ -2288,20 +2311,12 @@ function initEventListeners() {
   async function processIncomingVoiceQueue() {
     if (incomingVoiceQueue.length === 0) {
       isVoicePlaying = false;
-      const toast = document.getElementById('incomingVoiceToast');
-      if (toast) toast.classList.add('hidden');
       return;
     }
 
     isVoicePlaying = true;
     const item = incomingVoiceQueue.shift();
     const ctx = getSharedAudioContext();
-
-    // Show toast immediately so receiver sees who is talking
-    const toast = document.getElementById('incomingVoiceToast');
-    const speakerEl = document.getElementById('incomingVoiceSpeaker');
-    if (speakerEl) speakerEl.textContent = `${item.speakerName} bicara...`;
-    if (toast) toast.classList.remove('hidden');
 
     try {
       if (ctx && ctx.state === 'suspended') {
@@ -2311,41 +2326,24 @@ function initEventListeners() {
       if (ctx) playRadioChirp(ctx);
 
       const arrayBuffer = base64ToArrayBuffer(item.audioDataUrl);
+      const playNext = () => setTimeout(processIncomingVoiceQueue, 80);
 
       // WebKit Safari requires buffer.slice(0) copy
       ctx.decodeAudioData(arrayBuffer.slice(0), (audioBuffer) => {
         const source = ctx.createBufferSource();
         source.buffer = audioBuffer;
         source.connect(ctx.destination);
-
-        source.onended = () => {
-          if (incomingVoiceQueue.length === 0 && toast) {
-            toast.classList.add('hidden');
-          }
-          setTimeout(processIncomingVoiceQueue, 80);
-        };
-
+        source.onended = playNext;
         source.start(0);
       }, (err) => {
         console.warn('decodeAudioData error, attempting fallback:', err);
         const fallbackAudio = new Audio(item.audioDataUrl);
-        fallbackAudio.onended = () => {
-          if (incomingVoiceQueue.length === 0 && toast) toast.classList.add('hidden');
-          setTimeout(processIncomingVoiceQueue, 80);
-        };
-        fallbackAudio.onerror = () => {
-          if (incomingVoiceQueue.length === 0 && toast) toast.classList.add('hidden');
-          setTimeout(processIncomingVoiceQueue, 80);
-        };
-        fallbackAudio.play().catch(() => {
-          if (incomingVoiceQueue.length === 0 && toast) toast.classList.add('hidden');
-          setTimeout(processIncomingVoiceQueue, 80);
-        });
+        fallbackAudio.onended = playNext;
+        fallbackAudio.onerror = playNext;
+        fallbackAudio.play().catch(playNext);
       });
-
     } catch (err) {
       console.warn('Voice play queue error:', err);
-      if (incomingVoiceQueue.length === 0 && toast) toast.classList.add('hidden');
       setTimeout(processIncomingVoiceQueue, 80);
     }
   }
