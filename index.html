@@ -69,6 +69,7 @@
       <button id="btnOpenQrModal" class="w-8 h-8 rounded-xl bg-emerald-500/15 hover:bg-emerald-500/25 text-emerald-400 border border-emerald-500/30 flex items-center justify-center text-xs font-bold transition shadow-sm" title="Scan QR Code untuk Gabung Rombongan">
         <i data-lucide="qr-code" class="w-4 h-4"></i>
       </button>
+      <button id="btnOpenHazardModal" class="w-8 h-8 rounded-xl bg-rose-500/15 hover:bg-rose-500/25 text-rose-400 border border-rose-500/30 flex items-center justify-center transition shadow-sm" title="Tandai bahaya di lokasi ini"><i data-lucide="triangle-alert" class="w-4 h-4"></i></button>
 
       <!-- Voice Toggle -->
       <button id="btnVoiceToggle" class="w-8 h-8 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-300 border border-slate-700 flex items-center justify-center transition" title="Toggle Suara Interkom">
@@ -213,6 +214,9 @@
         <div class="text-xs font-bold text-slate-100 truncate" id="incomingTextMessage">Halo rombongan...</div>
       </div>
     </div>
+    <div id="hazardAlertToast" class="hidden absolute top-20 left-1/2 -translate-x-1/2 z-40 bg-rose-950/95 border-2 border-rose-400 backdrop-blur-md px-4 py-3 rounded-2xl shadow-2xl flex items-center gap-3 max-w-[90vw]">
+      <div class="w-10 h-10 rounded-full bg-rose-500/20 text-rose-300 flex items-center justify-center"><i data-lucide="triangle-alert" class="w-6 h-6"></i></div><div><div class="text-[10px] text-rose-300 font-bold uppercase tracking-wider">Peringatan Bahaya</div><div id="hazardAlertLabel" class="text-base font-black text-white">Bahaya</div><div id="hazardAlertDistance" class="text-xs text-rose-200">Sekitar 1 km</div></div><button id="btnCloseHazardToast" class="ml-2 text-rose-200">✕</button>
+    </div>
   </main>
 
   <!-- ROSTER & CONVOY DRAWER (RIGHT PANEL) -->
@@ -287,6 +291,14 @@
   </aside>
 
   <!-- REGISTRATION / PROFILE MODAL (AUTO MASUK & CLICK TO EDIT) -->
+  <div id="hazardModal" class="hidden fixed inset-0 bg-slate-950/85 backdrop-blur-md z-50 flex items-center justify-center p-4">
+    <div class="bg-slate-900 border border-rose-500/40 w-full max-w-sm rounded-2xl shadow-2xl overflow-hidden"><div class="p-4 border-b border-slate-800 flex items-center justify-between"><h3 class="font-bold text-white">Tandai Bahaya</h3><button id="btnCloseHazardModal" class="text-slate-400">✕</button></div>
+      <form id="hazardForm" class="p-4 space-y-3"><label class="block text-xs text-slate-300">Jenis bahaya<select id="hazardType" class="mt-1 w-full px-3 py-2 bg-slate-950 border border-slate-700 rounded-xl text-white"><option value="road_damage">Jalan rusak (permanen)</option><option value="downhill">Turunan (permanen)</option><option value="sharp_turn">Tikungan tajam (permanen)</option><option value="traffic_light">Lampu merah (permanen)</option><option value="etle">E-T-L-E (permanen)</option><option value="police">Polisi (sementara)</option></select></label>
+        <label id="policeDurationWrap" class="hidden block text-xs text-slate-300">Masa berlaku<select id="policeDuration" class="mt-1 w-full px-3 py-2 bg-slate-950 border border-slate-700 rounded-xl text-white"><option value="30">30 menit</option><option value="60">1 jam</option></select></label>
+        <p class="text-[11px] text-slate-400">Tag memakai posisi GPS Anda saat ini. Rider mendapat 3 beep dan notifikasi saat berjarak sampai 1 km.</p><button class="w-full py-2.5 rounded-xl bg-rose-500 text-white font-bold">Kirim Tag</button></form>
+    </div>
+  </div>
+
   <div id="profileModal" class="hidden fixed inset-0 bg-slate-950/85 backdrop-blur-md z-50 flex items-center justify-center p-4">
     <div class="bg-slate-900 border border-slate-800 w-full max-w-md rounded-2xl shadow-2xl overflow-hidden animate-in fade-in zoom-in-95 duration-200">
       <div class="px-6 py-4 border-b border-slate-800 flex items-center justify-between">
@@ -324,6 +336,9 @@
           <p class="text-[10px] text-slate-500 mt-1">Pastikan semua anggota mengisi Kode Rombongan yang sama agar saling terhubung.</p>
         </div>
 
+        <div>
+          <label class="block text-xs font-semibold text-slate-300 mb-1">Password Rombongan *</label><input type="password" id="inputRoomPassword" required minlength="6" autocomplete="current-password" placeholder="Masukkan password dari Ridwan" class="w-full px-3 py-2 bg-slate-950 border border-slate-800 rounded-xl text-slate-100 text-sm focus:outline-none focus:border-amber-400"><p class="text-[10px] text-slate-500 mt-1">Semua rider harus menggunakan sandi sama (min. 6 karakter).</p>
+        </div>
         <div>
           <label class="block text-xs font-semibold text-slate-300 mb-1">Status Perangkat</label>
           <div class="grid grid-cols-2 gap-2">
@@ -547,6 +562,6 @@
   <!-- Audio element for chime notification -->
   <audio id="alertAudio" src="https://assets.mixkit.co/active_storage/sfx/2869/2869-preview.mp3" preload="auto"></audio>
 
-  <script src="app.js?v=3.5"></script>
+  <script src="app.js?v=3.6"></script>
 </body>
 </html>
