@@ -781,21 +781,91 @@ async function syncWithServer(customAction = 'update', extraData = {}) {
    2. SCREEN WAKE LOCK (Mencegah Layar HP Mati di Stang Motor)
    ========================================================================== */
 async function initWakeLock() {
-  if ('wakeLock' in navigator) {
+  const badge = document.getElementById('wakeLockBadge');
+  let requestPending = false;
+  let retryTimer = null;
+  let retryDelay = 1000;
+
+  function setWakeLockBadge(active, text) {
+    if (!badge) return;
+    badge.textContent = text;
+    badge.title = active
+      ? 'Chrome menahan layar tetap aktif selama TouringMate terbuka'
+      : 'Chrome belum menahan layar. Ketuk layar untuk mencoba lagi.';
+    badge.className = active
+      ? 'inline-flex items-center px-1.5 py-0.5 rounded-md bg-emerald-500/10 text-emerald-300 border border-emerald-500/30 text-[9px] font-semibold'
+      : 'inline-flex items-center px-1.5 py-0.5 rounded-md bg-amber-500/10 text-amber-300 border border-amber-500/30 text-[9px] font-semibold';
+  }
+
+  function hasActiveWakeLock() {
+    return !!(state.wakeLock && !state.wakeLock.released);
+  }
+
+  function scheduleWakeLockRetry() {
+    if (retryTimer || document.visibilityState !== 'visible') return;
+    retryTimer = setTimeout(() => {
+      retryTimer = null;
+      requestWakeLock();
+    }, retryDelay);
+    retryDelay = Math.min(retryDelay * 2, 30000);
+  }
+
+  async function requestWakeLock() {
+    if (!('wakeLock' in navigator)) {
+      setWakeLockBadge(false, 'LAYAR DAPAT MATI');
+      return;
+    }
+    if (document.visibilityState !== 'visible' || hasActiveWakeLock() || requestPending) return;
+
+    requestPending = true;
     try {
-      state.wakeLock = await navigator.wakeLock.request('screen');
-      const badge = document.getElementById('wakeLockBadge');
-      if (badge) badge.classList.remove('hidden');
-      
-      state.wakeLock.addEventListener('release', () => {
-        if (badge) badge.classList.add('hidden');
-      });
+      const sentinel = await navigator.wakeLock.request('screen');
+      state.wakeLock = sentinel;
+      retryDelay = 1000;
+      setWakeLockBadge(true, 'LAYAR AKTIF');
+
+      sentinel.addEventListener('release', () => {
+        if (state.wakeLock === sentinel) state.wakeLock = null;
+        setWakeLockBadge(false, 'LAYAR DAPAT MATI');
+        if (document.visibilityState === 'visible') scheduleWakeLockRetry();
+      }, { once: true });
     } catch (err) {
       console.warn('Wake Lock request failed:', err);
+      setWakeLockBadge(false, 'LAYAR DAPAT MATI');
+    } finally {
+      requestPending = false;
     }
   }
-}
 
+  document.addEventListener('visibilitychange', () => {
+    if (document.visibilityState === 'visible') {
+      if (retryTimer) {
+        clearTimeout(retryTimer);
+        retryTimer = null;
+      }
+      retryDelay = 1000;
+      requestWakeLock();
+    } else {
+      if (retryTimer) {
+        clearTimeout(retryTimer);
+        retryTimer = null;
+      }
+      setWakeLockBadge(false, 'KEMBALI UNTUK MENJAGA LAYAR');
+    }
+  });
+
+  window.addEventListener('pageshow', requestWakeLock);
+  window.addEventListener('focus', requestWakeLock);
+
+  // Retry after a user gesture in case Chrome refused the initial request.
+  ['pointerdown', 'touchstart', 'keydown'].forEach((eventName) => {
+    window.addEventListener(eventName, () => {
+      if (!hasActiveWakeLock()) requestWakeLock();
+    }, { passive: true });
+  });
+
+  await requestWakeLock();
+}
 /* ==========================================================================
    3. LEAFLET MAP & RIDER MARKERS
    ========================================================================== */
