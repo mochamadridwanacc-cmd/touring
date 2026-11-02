@@ -43,52 +43,46 @@
   </div>
 
   <!-- TOP HUD BAR -->
-  <header class="bg-slate-900/90 backdrop-blur-md border-b border-slate-800 px-4 py-2.5 flex items-center justify-between z-30 shadow-lg">
-    <div class="flex items-center space-x-3">
-      <div class="w-9 h-9 rounded-xl bg-amber-500/20 border border-amber-500/50 flex items-center justify-center text-amber-400 font-black">
-        <i data-lucide="compass" class="w-5 h-5"></i>
+  <header class="bg-slate-900/90 backdrop-blur-md border-b border-slate-800 px-3 sm:px-4 py-2 flex items-center justify-between z-30 shadow-lg">
+    <div class="flex items-center space-x-2.5">
+      <!-- App Logo -->
+      <div class="w-8 h-8 rounded-xl bg-amber-500/20 border border-amber-500/50 flex items-center justify-center text-amber-400 font-black shadow-sm">
+        <i data-lucide="compass" class="w-4 h-4"></i>
       </div>
-      <div>
-        <h1 class="text-sm font-bold tracking-wider text-slate-100 flex items-center gap-1.5">
-          TOURING<span class="text-amber-400">MATE</span>
-          <span id="wakeLockBadge" class="hidden text-[10px] bg-emerald-500/20 text-emerald-400 border border-emerald-500/30 px-1.5 py-0.5 rounded-full font-mono">
-            WAKE LOCK ON
-          </span>
-        </h1>
-        <p class="text-[11px] text-slate-400 flex items-center gap-1.5 flex-wrap">
-          <button id="btnHeaderProfile" class="flex items-center gap-1 hover:text-amber-400 transition" title="Klik untuk edit profil Anda">
-            <span id="deviceRoleBadge" class="px-1.5 py-0.5 rounded text-[10px] bg-slate-800 text-slate-300 font-bold border border-slate-700">PESERTA</span>
-            <span id="myProfileSummary" class="truncate max-w-[95px] sm:max-w-none text-slate-200 font-semibold underline decoration-dotted decoration-slate-600">Belum Terdaftar</span>
-          </button>
-          <span id="serverSyncIndicator" class="inline-flex items-center gap-1 text-[10px] text-emerald-400 font-mono">
-            <span class="w-1.5 h-1.5 rounded-full bg-emerald-500 animate-ping"></span> Live
-          </span>
-        </p>
+      
+      <!-- Role Badge & Server Sync (Cukup Logo, Master, tanpa nama & plat) -->
+      <div class="flex items-center gap-1.5">
+        <button id="btnHeaderProfile" class="flex items-center gap-1 hover:opacity-85 transition" title="Klik untuk edit profil Anda">
+          <span id="deviceRoleBadge" class="px-2 py-0.5 rounded-lg text-[10px] bg-slate-800 text-slate-300 font-bold border border-slate-700 tracking-wider">PESERTA</span>
+          <span id="myProfileSummary" class="hidden"></span>
+        </button>
+        <span id="serverSyncIndicator" class="inline-flex items-center gap-1 text-[10px] text-emerald-400 font-mono">
+          <span class="w-1.5 h-1.5 rounded-full bg-emerald-500 animate-ping"></span> Live
+        </span>
+        <span id="wakeLockBadge" class="hidden"></span>
       </div>
     </div>
 
-    <!-- Quick Controls -->
+    <!-- Quick Controls: Icons Only -->
     <div class="flex items-center space-x-1.5 sm:space-x-2">
-      <!-- QR Join Button -->
-      <button id="btnOpenQrModal" class="px-2.5 py-1.5 rounded-lg bg-emerald-500/15 hover:bg-emerald-500/25 text-emerald-400 border border-emerald-500/30 flex items-center gap-1.5 text-xs font-bold transition shadow-sm" title="Scan QR Code untuk Gabung Rombongan">
+      <!-- QR Join Button (Cukup Logo QR) -->
+      <button id="btnOpenQrModal" class="w-8 h-8 rounded-xl bg-emerald-500/15 hover:bg-emerald-500/25 text-emerald-400 border border-emerald-500/30 flex items-center justify-center text-xs font-bold transition shadow-sm" title="Scan QR Code untuk Gabung Rombongan">
         <i data-lucide="qr-code" class="w-4 h-4"></i>
-        <span>QR Join</span>
       </button>
 
       <!-- Voice Toggle -->
-      <button id="btnVoiceToggle" class="p-2 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-300 border border-slate-700 transition" title="Toggle Suara Interkom">
+      <button id="btnVoiceToggle" class="w-8 h-8 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-300 border border-slate-700 flex items-center justify-center transition" title="Toggle Suara Interkom">
         <i data-lucide="volume-2" class="w-4 h-4"></i>
       </button>
 
-      <!-- Chat & Voice History Button -->
-      <button id="btnOpenChatLog" class="relative px-2.5 py-1.5 rounded-lg bg-cyan-500/15 hover:bg-cyan-500/25 text-cyan-400 border border-cyan-500/30 flex items-center gap-1.5 text-xs font-bold transition shadow-sm" title="Riwayat Percakapan & Suara Interkom">
+      <!-- Chat & Voice History Button (Cukup Logo Chat) -->
+      <button id="btnOpenChatLog" class="relative w-8 h-8 rounded-xl bg-cyan-500/15 hover:bg-cyan-500/25 text-cyan-400 border border-cyan-500/30 flex items-center justify-center text-xs font-bold transition shadow-sm" title="Riwayat Percakapan & Suara Interkom">
         <i data-lucide="message-square" class="w-4 h-4"></i>
-        <span class="hidden sm:inline">Log & Chat</span>
-        <span id="unreadChatBadge" class="hidden px-1.5 py-0.2 bg-rose-500 text-white rounded-full text-[9px] font-bold">1</span>
+        <span id="unreadChatBadge" class="hidden absolute -top-1 -right-1 w-2.5 h-2.5 bg-rose-500 rounded-full border-2 border-slate-900"></span>
       </button>
 
       <!-- Roster Drawer Toggle -->
-      <button id="btnToggleRoster" class="relative px-3 py-1.5 rounded-lg bg-amber-500 hover:bg-amber-400 text-slate-950 font-bold text-xs flex items-center gap-1.5 shadow-md shadow-amber-500/20" title="Buka Detail Rombongan">
+      <button id="btnToggleRoster" class="relative px-2.5 py-1.5 rounded-xl bg-amber-500 hover:bg-amber-400 text-slate-950 font-bold text-xs flex items-center gap-1 shadow-md shadow-amber-500/20" title="Buka Detail Rombongan">
         <i data-lucide="users" class="w-4 h-4"></i>
         <span id="rosterCountBadge">1 Rider</span>
       </button>
@@ -102,18 +96,30 @@
 
     <!-- FLOATING HUD LEFT: SPEED & TRANSPARENT CONVOY PARTICIPANTS LIST -->
     <div class="absolute top-3 left-3 z-20 flex flex-col gap-2 pointer-events-none max-w-[210px] sm:max-w-[240px]">
-      <!-- Speed & GPS Status Card -->
+      <!-- Status Badge for PTT Recording / Sent (Tepat Di Bawah Logo, Di Atas Speed) -->
+      <div id="pttStatusIndicator" class="hidden pointer-events-auto self-start px-3 py-1.5 rounded-xl bg-rose-600/95 border border-rose-400/60 text-white text-xs font-bold tracking-wider shadow-xl flex items-center gap-2 transition-all duration-200">
+        <span id="pttStatusDot" class="w-2 h-2 rounded-full bg-white animate-ping"></span>
+        <span id="pttStatusText">MEREKAM...</span>
+      </div>
+
+      <!-- Speed & GPS Status Card with Toggle GPS Button -->
       <div class="pointer-events-auto bg-slate-950/45 backdrop-blur-md border border-slate-700/30 rounded-2xl px-3 py-2 shadow-xl flex items-center gap-3">
         <div>
           <div class="text-[9px] text-slate-400/80 uppercase tracking-widest font-mono">Speed</div>
           <div class="text-lg font-black text-amber-400 font-mono leading-none mt-0.5"><span id="hudSpeed">0</span> <span class="text-[10px] font-normal text-slate-400">km/h</span></div>
         </div>
         <div class="w-px h-6 bg-slate-700/40"></div>
-        <div>
-          <div class="text-[9px] text-slate-400/80 uppercase tracking-widest font-mono">GPS</div>
-          <div id="gpsStatusText" class="text-[11px] font-semibold text-emerald-400 flex items-center gap-1 leading-none mt-0.5">
-            <span class="w-1.5 h-1.5 rounded-full bg-emerald-500 animate-pulse"></span> Aktif
+        <div class="flex items-center gap-2">
+          <div>
+            <div class="text-[9px] text-slate-400/80 uppercase tracking-widest font-mono">GPS</div>
+            <div id="gpsStatusText" class="text-[11px] font-semibold text-emerald-400 flex items-center gap-1 leading-none mt-0.5">
+              <span class="w-1.5 h-1.5 rounded-full bg-emerald-500 animate-pulse"></span> Aktif
+            </div>
           </div>
+          <!-- Tombol Matikan / Nyalakan GPS -->
+          <button id="btnToggleGps" class="w-7 h-7 rounded-lg bg-emerald-500/15 hover:bg-emerald-500/25 text-emerald-400 border border-emerald-500/30 flex items-center justify-center transition active:scale-90" title="Matikan GPS">
+            <i data-lucide="power" class="w-3.5 h-3.5"></i>
+          </button>
         </div>
       </div>
 
@@ -131,11 +137,6 @@
 
     <!-- CENTER-RIGHT THUMB ACTION BAR: RECENTER + PTT + MIC SETTINGS + ZOOM -->
     <div class="absolute right-3.5 top-1/2 -translate-y-1/2 z-20 flex flex-col items-center gap-2.5">
-      <!-- Status Badge for PTT Recording / VOX -->
-      <div id="pttStatusIndicator" class="hidden px-2.5 py-1 rounded-full bg-rose-500/90 text-white text-[10px] font-bold tracking-wider animate-pulse shadow-lg flex items-center gap-1.5 whitespace-nowrap">
-        <span class="w-2 h-2 rounded-full bg-white animate-ping"></span> <span id="pttStatusText">MEREKAM...</span>
-      </div>
-
       <!-- Recenter GPS Map Button -->
       <button id="btnRecenter" class="w-11 h-11 rounded-2xl bg-slate-900/80 hover:bg-slate-800 text-slate-200 border border-slate-700/50 shadow-xl flex items-center justify-center transition active:scale-95 backdrop-blur-md" title="Pusatkan Peta ke Posisi Saya">
         <i data-lucide="crosshair" class="w-5 h-5 text-amber-400"></i>
@@ -526,6 +527,6 @@
   <!-- Audio element for chime notification -->
   <audio id="alertAudio" src="https://assets.mixkit.co/active_storage/sfx/2869/2869-preview.mp3" preload="auto"></audio>
 
-  <script src="app.js?v=2.9"></script>
+  <script src="app.js?v=3.0"></script>
 </body>
 </html>

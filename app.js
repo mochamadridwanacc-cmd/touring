@@ -223,9 +223,9 @@ function initCloudMqtt() {
         } else {
           console.log('[MQTT] Subscribed to room topics for:', cleanRoom);
           syncWithServer('update');
-          // Auto ping cloud langsung saat aplikasi dibuka & terhubung
+          // Auto ping cloud langsung saat aplikasi dibuka (maksimal 5x, lalu tunggu 30 detik)
           setTimeout(() => {
-            sendPingTest(true);
+            startAutoPingCycle();
           }, 350);
         }
       });
@@ -382,6 +382,7 @@ function switchCloudRoom(newRoomCode) {
   const cleanNew = (newRoomCode || 'TOURING-1').replace(/[^A-Z0-9_-]/gi, '');
 
   state.roomCode = cleanNew;
+  updateBrowserUrlWithRoom(cleanNew);
   state.activeCloudRiders = {};
   state.riders = [];
   updateMapMarkers();
@@ -410,6 +411,7 @@ function switchCloudRoom(newRoomCode) {
     if (!err) {
       updateMqttStatusUI('connected', state.mqttBrokerName);
       syncWithServer('update');
+      startAutoPingCycle();
     }
   });
 }
@@ -438,6 +440,68 @@ function refreshCloudConvoy() {
     const pingText = state.lastPingRtt !== null ? ` • ${state.lastPingRtt}ms` : '';
     syncInd.innerHTML = `<span class="w-1.5 h-1.5 rounded-full bg-emerald-500 animate-pulse"></span> Cloud Live (${count} Rider${pingText})`;
   }
+}
+
+// Routing & URL Management: https://.../touring/3431/
+function updateBrowserUrlWithRoom(roomCode) {
+  if (!roomCode) return;
+  const clean = roomCode.trim().toUpperCase();
+  const isTouringRepo = window.location.pathname.indexOf('/touring') !== -1;
+  const targetPath = (isTouringRepo ? '/touring/' : '/') + clean + '/';
+
+  // Perbarui address bar browser secara mulus tanpa reload halaman
+  if (window.location.pathname !== targetPath) {
+    try {
+      window.history.replaceState({ room: clean }, '', targetPath);
+      console.log('[Router] Browser URL updated to:', targetPath);
+    } catch (e) {
+      console.warn('[Router] Failed to update browser URL:', e);
+    }
+  }
+}
+
+// Auto-ping cloud: Maksimal 5x ping, lalu tunggu/jeda 30 detik
+let pingBurstCount = 0;
+const MAX_BURST_PINGS = 5;
+const PING_INTERVAL_MS = 5000;
+const PING_COOLDOWN_MS = 30000;
+let pingCooldownTimer = null;
+let pingStepTimer = null;
+let isPingInCooldown = false;
+
+function startAutoPingCycle() {
+  if (pingCooldownTimer) clearTimeout(pingCooldownTimer);
+  if (pingStepTimer) clearTimeout(pingStepTimer);
+  pingBurstCount = 0;
+  isPingInCooldown = false;
+  runAutoPingStep();
+}
+
+function runAutoPingStep() {
+  if (isPingInCooldown) return;
+
+  if (pingBurstCount >= MAX_BURST_PINGS) {
+    // Sudah 5x ping, istirahat 30 detik
+    isPingInCooldown = true;
+    console.log(`[MQTT Ping] Telah mencapai batas ${MAX_BURST_PINGS}x ping. Menunggu jeda ${PING_COOLDOWN_MS / 1000} detik...`);
+    pingCooldownTimer = setTimeout(() => {
+      pingBurstCount = 0;
+      isPingInCooldown = false;
+      console.log('[MQTT Ping] Jeda 30 detik selesai. Memulai siklus 5x ping baru.');
+      runAutoPingStep();
+    }, PING_COOLDOWN_MS);
+    return;
+  }
+
+  // Kirim auto-ping jika mqtt terhubung
+  if (state.mqttClient && state.mqttClient.connected) {
+    pingBurstCount++;
+    console.log(`[MQTT Ping] Auto ping dikirim: ${pingBurstCount}/${MAX_BURST_PINGS}`);
+    sendPingTest(true);
+  }
+
+  // Jadwalkan ping berikutnya dalam 5 detik
+  pingStepTimer = setTimeout(runAutoPingStep, PING_INTERVAL_MS);
 }
 
 function sendPingTest(isAuto = false) {
@@ -482,20 +546,23 @@ function sendPingTest(isAuto = false) {
   }, 4000);
 }
 
-// Auto-ping cloud secara berkala tiap 25 detik agar indikator status selalu akurat
-setInterval(() => {
-  if (state.mqttClient && state.mqttClient.connected) {
-    sendPingTest(true);
-  }
-}, 25000);
-
 /* ==========================================================================
    1. USER PROFILE, DEVICE ROLE (MASTER / PESERTA) & REALTIME SYNC
    ========================================================================== */
 function loadProfile() {
-  // 1. Auto-detect and populate Room Code from URL query parameter e.g. ?room=3431
+  // 1. Auto-detect Room Code from URL query param (?room=3431) or path (/touring/3431/ or /3431/)
   const urlParams = new URLSearchParams(window.location.search);
-  const queryRoom = urlParams.get('room');
+  let queryRoom = urlParams.get('room');
+
+  if (!queryRoom) {
+    const isTouringRepo = window.location.pathname.indexOf('/touring') !== -1;
+    const subPath = isTouringRepo ? window.location.pathname.replace(/^\/touring\/?/, '') : window.location.pathname.replace(/^\//, '');
+    const segments = subPath.split('/').filter(Boolean);
+    if (segments.length > 0 && segments[0].indexOf('.') === -1 && segments[0].toLowerCase() !== 'touring') {
+      queryRoom = segments[0];
+    }
+  }
+
   if (queryRoom) {
     state.roomCode = queryRoom.trim().toUpperCase();
     localStorage.setItem('touring_room', state.roomCode);
@@ -503,6 +570,9 @@ function loadProfile() {
     const savedRoom = localStorage.getItem('touring_room');
     if (savedRoom) state.roomCode = savedRoom.toUpperCase();
   }
+
+  // Sinkronkan URL browser address bar menjadi: https://.../touring/3431/
+  updateBrowserUrlWithRoom(state.roomCode);
 
   // Pre-fill input in modal
   const roomInput = document.getElementById('inputRoomCode');
@@ -805,57 +875,117 @@ function updateMapMarkers() {
 /* ==========================================================================
    4. GEOLOCATION & REALTIME DISTANCE (HAVERSINE)
    ========================================================================== */
-function initGeolocation() {
-  if (!navigator.geolocation) {
-    document.getElementById('gpsStatusText').innerHTML = '<span class="text-rose-400">GPS Tidak Didukung</span>';
-    return;
+let gpsWatchId = null;
+let isGpsActive = true;
+
+function updateGpsStatusUI(isActive, message) {
+  const statusEl = document.getElementById('gpsStatusText');
+  const btnGps = document.getElementById('btnToggleGps');
+  if (statusEl) {
+    if (isActive) {
+      statusEl.className = 'text-[11px] font-semibold text-emerald-400 flex items-center gap-1 leading-none mt-0.5 cursor-pointer';
+      statusEl.innerHTML = `<span class="w-1.5 h-1.5 rounded-full bg-emerald-500 animate-pulse"></span> ${message || 'GPS Aktif'}`;
+    } else {
+      statusEl.className = 'text-[11px] font-semibold text-slate-400 flex items-center gap-1 leading-none mt-0.5 cursor-pointer';
+      statusEl.innerHTML = `<span class="w-1.5 h-1.5 rounded-full bg-slate-500"></span> ${message || 'GPS Nonaktif'}`;
+    }
+  }
+  if (btnGps) {
+    if (isActive) {
+      btnGps.className = 'w-7 h-7 rounded-lg bg-emerald-500/15 hover:bg-emerald-500/25 text-emerald-400 border border-emerald-500/30 flex items-center justify-center transition active:scale-90';
+      btnGps.title = 'GPS Aktif (Klik untuk Matikan GPS)';
+    } else {
+      btnGps.className = 'w-7 h-7 rounded-lg bg-rose-500/15 hover:bg-rose-500/25 text-rose-400 border border-rose-500/30 flex items-center justify-center transition active:scale-90';
+      btnGps.title = 'GPS Nonaktif (Klik untuk Nyalakan GPS)';
+    }
+    btnGps.innerHTML = '<i data-lucide="power" class="w-3.5 h-3.5"></i>';
+    if (window.lucide) lucide.createIcons();
+  }
+}
+
+function handleGpsPosition(position) {
+  if (!isGpsActive) return;
+  const { latitude, longitude, speed } = position.coords;
+  state.myCoords.lat = latitude;
+  state.myCoords.lng = longitude;
+  state.myCoords.speed = speed ? Math.round(speed * 3.6) : 0; // m/s to km/h
+
+  // Simpan koordinat akurat terakhir ke localStorage
+  try {
+    localStorage.setItem('touring_last_coords', JSON.stringify({ lat: latitude, lng: longitude }));
+  } catch (e) {}
+
+  const hudSpeed = document.getElementById('hudSpeed');
+  if (hudSpeed) hudSpeed.textContent = state.myCoords.speed;
+  updateGpsStatusUI(true, 'GPS Akurat');
+
+  // Auto-fokus & auto-center langsung ke lokasi GPS sekarang tanpa perlu pencet tombol apapun!
+  if (state.map && (!state.hasFirstGpsLock || state.isAutoFollowMap)) {
+    state.map.setView([latitude, longitude], 17, { animate: !state.hasFirstGpsLock ? false : true });
+    state.hasFirstGpsLock = true;
   }
 
-  const handlePosition = (position) => {
-    const { latitude, longitude, speed } = position.coords;
-    state.myCoords.lat = latitude;
-    state.myCoords.lng = longitude;
-    state.myCoords.speed = speed ? Math.round(speed * 3.6) : 0; // m/s to km/h
+  updateMapMarkers();
+  renderRoster();
+}
 
-    // Simpan koordinat akurat terakhir ke localStorage
-    try {
-      localStorage.setItem('touring_last_coords', JSON.stringify({ lat: latitude, lng: longitude }));
-    } catch (e) {}
+function handleGpsError(err) {
+  if (!isGpsActive) return;
+  console.warn('Geolocation notice:', err.code, err.message);
+  let msg = 'GPS Mode Sim';
+  if (err.code === 1) {
+    msg = 'Izin Ditolak';
+  } else if (err.code === 2) {
+    msg = 'Sinyal Lemah';
+  } else if (err.code === 3) {
+    msg = 'GPS Timeout';
+  }
+  updateGpsStatusUI(true, msg);
+}
 
-    document.getElementById('hudSpeed').textContent = state.myCoords.speed;
-    document.getElementById('gpsStatusText').innerHTML = '<span class="w-2 h-2 rounded-full bg-emerald-500 animate-pulse"></span> GPS Akurat';
+function startGeolocation() {
+  if (!navigator.geolocation) {
+    updateGpsStatusUI(false, 'GPS Tidak Didukung');
+    return;
+  }
+  isGpsActive = true;
+  updateGpsStatusUI(true, 'GPS Aktif');
 
-    // Auto-fokus & auto-center langsung ke lokasi GPS sekarang tanpa perlu pencet tombol apapun!
-    if (state.map && (!state.hasFirstGpsLock || state.isAutoFollowMap)) {
-      state.map.setView([latitude, longitude], 17, { animate: !state.hasFirstGpsLock ? false : true });
-      state.hasFirstGpsLock = true;
-    }
-
-    updateMapMarkers();
-    renderRoster();
-  };
-
-  const handleError = (err) => {
-    console.warn('Geolocation notice:', err.code, err.message);
-    let msg = 'GPS Mode Sim';
-    if (err.code === 1) {
-      msg = 'Izin GPS Ditolak';
-    } else if (err.code === 2) {
-      msg = 'Sinyal GPS Lemah';
-    } else if (err.code === 3) {
-      msg = 'GPS Timeout';
-    }
-    document.getElementById('gpsStatusText').innerHTML = `<span class="text-amber-400">${msg}</span>`;
-  };
-
-  // 1. Kunci posisi instan cepat (<200ms) dari cell tower/wifi cache agar peta langsung melompat ke lokasi Anda
-  navigator.geolocation.getCurrentPosition(handlePosition, () => {}, { enableHighAccuracy: false, timeout: 5000, maximumAge: 60000 });
+  // 1. Kunci posisi instan cepat (<200ms) dari cell tower/wifi cache
+  navigator.geolocation.getCurrentPosition(handleGpsPosition, () => {}, { enableHighAccuracy: false, timeout: 5000, maximumAge: 60000 });
 
   // 2. Kunci posisi akurasi tinggi GPS Satelit
-  navigator.geolocation.getCurrentPosition(handlePosition, handleError, { enableHighAccuracy: true, timeout: 15000, maximumAge: 0 });
+  navigator.geolocation.getCurrentPosition(handleGpsPosition, handleGpsError, { enableHighAccuracy: true, timeout: 15000, maximumAge: 0 });
 
   // 3. Pantau terus-menerus posisi motor/kendaraan
-  navigator.geolocation.watchPosition(handlePosition, handleError, { enableHighAccuracy: true, timeout: 15000, maximumAge: 0 });
+  if (gpsWatchId !== null) {
+    navigator.geolocation.clearWatch(gpsWatchId);
+  }
+  gpsWatchId = navigator.geolocation.watchPosition(handleGpsPosition, handleGpsError, { enableHighAccuracy: true, timeout: 15000, maximumAge: 0 });
+}
+
+function stopGeolocation() {
+  isGpsActive = false;
+  if (gpsWatchId !== null) {
+    navigator.geolocation.clearWatch(gpsWatchId);
+    gpsWatchId = null;
+  }
+  state.myCoords.speed = 0;
+  const hudSpeed = document.getElementById('hudSpeed');
+  if (hudSpeed) hudSpeed.textContent = '0';
+  updateGpsStatusUI(false, 'GPS Nonaktif');
+}
+
+function toggleGeolocation() {
+  if (isGpsActive) {
+    stopGeolocation();
+  } else {
+    startGeolocation();
+  }
+}
+
+function initGeolocation() {
+  startGeolocation();
 }
 
 // Haversine distance formula in meters
@@ -1134,6 +1264,10 @@ function toggleSimulation() {
    9. EVENT LISTENERS & UI WIRING
    ========================================================================== */
 function initEventListeners() {
+  // GPS Toggle button (Matikan / Nyalakan GPS)
+  document.getElementById('btnToggleGps')?.addEventListener('click', toggleGeolocation);
+  document.getElementById('gpsStatusText')?.addEventListener('click', toggleGeolocation);
+
   // Recenter map button
   document.getElementById('btnRecenter')?.addEventListener('click', () => {
     state.isAutoFollowMap = true;
@@ -1314,9 +1448,10 @@ function initEventListeners() {
   const shareInput = document.getElementById('shareUrlInput');
 
   function openQrModal() {
-    // Current URL with Room parameter (e.g. https://domain.com/?room=TOURING-1)
-    const base = window.location.origin + window.location.pathname;
-    const joinUrl = `${base}?room=${encodeURIComponent(state.roomCode || 'TOURING-1')}`;
+    // Current URL with clean Room path (e.g. https://domain.com/touring/3431/)
+    const isTouringRepo = window.location.pathname.indexOf('/touring') !== -1;
+    const cleanRoom = encodeURIComponent(state.roomCode || 'TOURING-1');
+    const joinUrl = `${window.location.origin}${isTouringRepo ? '/touring/' : '/'}${cleanRoom}/`;
     shareInput.value = joinUrl;
 
     // Clear previous QR
@@ -1479,14 +1614,36 @@ function initEventListeners() {
     }
   }
 
+  let pttToastTimer = null;
   function showPttToast(text, duration = 1500) {
     const ind = document.getElementById('pttStatusIndicator');
     const txt = document.getElementById('pttStatusText');
+    const dot = document.getElementById('pttStatusDot');
     if (!ind || !txt) return;
+
     txt.textContent = text;
     ind.classList.remove('hidden');
+
+    // Reset warna & animasi
+    ind.classList.remove('bg-rose-600/95', 'border-rose-400/60', 'bg-emerald-600/95', 'border-emerald-400/60', 'bg-amber-600/95', 'border-amber-400/60', 'bg-slate-800/95', 'border-slate-600/60', 'animate-pulse');
+    if (dot) dot.classList.remove('animate-ping', 'animate-pulse');
+
+    if (text.includes('REKAM') || text.includes('🎙️') || text.includes('🔴')) {
+      ind.classList.add('bg-rose-600/95', 'border-rose-400/60', 'animate-pulse');
+      if (dot) dot.classList.add('animate-ping');
+    } else if (text.includes('TERKIRIM') || text.includes('✅')) {
+      ind.classList.add('bg-emerald-600/95', 'border-emerald-400/60');
+      if (dot) dot.classList.add('animate-pulse');
+    } else if (text.includes('Mengirim') || text.includes('📤')) {
+      ind.classList.add('bg-amber-600/95', 'border-amber-400/60');
+      if (dot) dot.classList.add('animate-pulse');
+    } else {
+      ind.classList.add('bg-slate-800/95', 'border-slate-600/60');
+    }
+
+    if (pttToastTimer) clearTimeout(pttToastTimer);
     if (duration > 0) {
-      setTimeout(() => {
+      pttToastTimer = setTimeout(() => {
         if (!isRecordingPtt) ind.classList.add('hidden');
       }, duration);
     }
@@ -1695,7 +1852,7 @@ function initEventListeners() {
     if (isRecordingPtt || state.isMutedByHost) return;
     isRecordingPtt = true;
     updatePttButtonUI();
-    showPttToast('🔴 MEREKAM...', 0);
+    showPttToast('🎙️ MEREKAM...', 0);
 
     const ctx = getSharedAudioContext();
     if (ctx && ctx.state === 'suspended') {
@@ -1778,11 +1935,11 @@ function initEventListeners() {
     if (!isRecordingPtt) return;
     isRecordingPtt = false;
     updatePttButtonUI();
-    showPttToast('📤 Mengirim Suara...', 1200);
+    showPttToast('📤 Mengirim...', 1500);
 
     setTimeout(() => {
       flushPcmChunksAndBroadcast(() => {
-        showPttToast('✅ Terkirim ke Rombongan!', 1800);
+        showPttToast('✅ TERKIRIM!', 2000);
       });
 
       if (pttProcessor) {
@@ -1829,6 +1986,7 @@ function initEventListeners() {
         showPttToast('⚠️ Gagal Kirim Suara');
       } else {
         console.log('[Voice] Broadcast success!');
+        showPttToast('✅ TERKIRIM!', 2000);
         // Record to local conversation history only upon successful send
         appendChatMessage({
           id: 'voice-' + Date.now(),
