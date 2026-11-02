@@ -12,6 +12,8 @@ const state = {
   myCoords: { lat: -6.200000, lng: 106.816666, speed: 0, heading: 0 },
   riders: [],
   activeSpeakerUntil: {},
+  hazards: {},
+  hazardMarkers: {},
   map: null,
   mapMarkers: {},
   wakeLock: null,
@@ -145,6 +147,10 @@ function updateMqttStatusUI(status, detail) {
 }
 
 function initCloudMqtt() {
+  if (!state.myProfile?.roomPassword) {
+    document.getElementById('profileModal')?.classList.remove('hidden');
+    return;
+  }
   if (typeof mqtt === 'undefined') {
     console.warn('MQTT library not yet loaded, waiting...');
     updateMqttStatusUI('connecting', 'Memuat Library');
@@ -188,11 +194,13 @@ function initCloudMqtt() {
   }
 
   const cleanRoom = (state.roomCode || 'TOURING-1').replace(/[^A-Z0-9_-]/gi, '');
-  const topicLocation = `touringmate/rooms/${cleanRoom}/loc`;
-  const topicControl = `touringmate/rooms/${cleanRoom}/ctl`;
-  const topicVoice = `touringmate/rooms/${cleanRoom}/voice`;
-  const topicChat = `touringmate/rooms/${cleanRoom}/chat`;
-  const topicPing = `touringmate/rooms/${cleanRoom}/ping`;
+  const topicBase = roomTopicBase(cleanRoom);
+  const topicLocation = `${topicBase}/loc`;
+  const topicControl = `${topicBase}/ctl`;
+  const topicVoice = `${topicBase}/voice`;
+  const topicChat = `${topicBase}/chat`;
+  const topicPing = `${topicBase}/ping`;
+  const topicHazards = `${topicBase}/hazards`;
 
   try {
     const client = mqtt.connect(broker.url, {
@@ -219,7 +227,7 @@ function initCloudMqtt() {
       console.log(`[MQTT] Connected successfully to ${broker.name}!`);
       updateMqttStatusUI('connected', broker.name);
 
-      client.subscribe([topicLocation, topicControl, topicVoice, topicChat, topicPing], (err) => {
+      client.subscribe([topicLocation, topicControl, topicVoice, topicChat, topicPing, `${topicHazards}/#`], (err) => {
         if (err) {
           console.error('[MQTT] Subscription error:', err);
         } else {
@@ -259,6 +267,16 @@ function initCloudMqtt() {
           textPayload = new TextDecoder('utf-8').decode(payload);
         } else {
           textPayload = payload.toString();
+        }
+
+        if (!textPayload && topic.includes('/hazards/')) {
+          const deletedId = topic.split('/').pop();
+          delete state.hazards[deletedId];
+          const marker = state.hazardMarkers[deletedId];
+          if (state.map && marker) state.map.removeLayer(marker);
+          delete state.hazardMarkers[deletedId];
+          renderHazardMarkers();
+          return;
         }
 
         const msg = JSON.parse(textPayload);
@@ -328,6 +346,18 @@ function initCloudMqtt() {
               playVoiceFn(msg.senderName || 'Rider', msg.audio);
             }
           }
+        } else if (topic.includes('/hazards/')) {
+          if (msg && msg.id) {
+            if (msg.expiresAt && Date.now() >= msg.expiresAt) {
+              delete state.hazards[msg.id];
+              client.publish(topic, '', { qos: 1, retain: true });
+              renderHazardMarkers();
+            } else {
+              state.hazards[msg.id] = msg;
+              renderHazardMarkers();
+              checkHazardProximity();
+            }
+          }
         } else if (topic.endsWith('/ping')) {
           console.log('[MQTT Ping] Inbound ping:', msg);
           if (msg && msg.pingNonce) {
@@ -389,44 +419,34 @@ function tryNextBroker() {
   }, 1000);
 }
 
+function roomTopicBase(roomCode) {
+  const clean = (roomCode || state.roomCode || 'TOURING-1').replace(/[^A-Z0-9_-]/gi, '').toUpperCase();
+  const password = String(state.myProfile?.roomPassword || '').trim();
+  let hash = 2166136261;
+  for (const char of clean + '|' + password) { hash ^= char.charCodeAt(0); hash = Math.imul(hash, 16777619); }
+  return 'touringmate/rooms/' + clean + '/' + (hash >>> 0).toString(36);
+}
+
 function switchCloudRoom(newRoomCode) {
   const cleanOld = (state.roomCode || 'TOURING-1').replace(/[^A-Z0-9_-]/gi, '');
   const cleanNew = (newRoomCode || 'TOURING-1').replace(/[^A-Z0-9_-]/gi, '');
-
   state.roomCode = cleanNew;
   updateBrowserUrlWithRoom(cleanNew);
-  state.activeCloudRiders = {};
-  state.riders = [];
-  updateMapMarkers();
-  renderRoster();
-
-  if (!state.mqttClient || !state.mqttClient.connected) {
-    initCloudMqtt();
-    return;
-  }
-
-  state.mqttClient.unsubscribe([
-    `touringmate/rooms/${cleanOld}/loc`,
-    `touringmate/rooms/${cleanOld}/ctl`,
-    `touringmate/rooms/${cleanOld}/voice`,
-    `touringmate/rooms/${cleanOld}/chat`,
-    `touringmate/rooms/${cleanOld}/ping`
-  ]);
-
-  state.mqttClient.subscribe([
-    `touringmate/rooms/${cleanNew}/loc`,
-    `touringmate/rooms/${cleanNew}/ctl`,
-    `touringmate/rooms/${cleanNew}/voice`,
-    `touringmate/rooms/${cleanNew}/chat`,
-    `touringmate/rooms/${cleanNew}/ping`
-  ], (err) => {
-    if (!err) {
-      updateMqttStatusUI('connected', state.mqttBrokerName);
-      syncWithServer('update');
-      startAutoPingCycle();
-    }
-  });
+  state.activeCloudRiders = {}; state.riders = []; state.hazards = {};
+  renderHazardMarkers(); updateMapMarkers(); renderRoster();
+  if (!state.mqttClient || !state.mqttClient.connected) { initCloudMqtt(); return; }
+  state.mqttClient.unsubscribe([roomTopicBase(cleanOld)+'/loc',roomTopicBase(cleanOld)+'/ctl',roomTopicBase(cleanOld)+'/voice',roomTopicBase(cleanOld)+'/chat',roomTopicBase(cleanOld)+'/ping',roomTopicBase(cleanOld)+'/hazards/#']);
+  state.mqttClient.subscribe([roomTopicBase(cleanNew)+'/loc',roomTopicBase(cleanNew)+'/ctl',roomTopicBase(cleanNew)+'/voice',roomTopicBase(cleanNew)+'/chat',roomTopicBase(cleanNew)+'/ping',roomTopicBase(cleanNew)+'/hazards/#'], err => { if (!err) { updateMqttStatusUI('connected',state.mqttBrokerName); syncWithServer('update'); startAutoPingCycle(); } });
 }
+
+const HAZARD_TYPES = {road_damage:{label:'Jalan Rusak',icon:'construction',color:'#fb7185',permanent:true},downhill:{label:'Turunan',icon:'trending-down',color:'#fbbf24',permanent:true},sharp_turn:{label:'Tikungan Tajam',icon:'corner-up-right',color:'#fb923c',permanent:true},traffic_light:{label:'Lampu Merah',icon:'traffic-cone',color:'#f87171',permanent:true},etle:{label:'E-T-L-E',icon:'camera',color:'#c084fc',permanent:true},police:{label:'Polisi',icon:'shield-alert',color:'#60a5fa',permanent:false}};
+function renderHazardMarkers(){if(!state.map)return;const active=new Set(Object.keys(state.hazards));Object.entries(state.hazards).forEach(([id,h])=>{const t=HAZARD_TYPES[h.type];if(!t||!Number.isFinite(h.lat)||!Number.isFinite(h.lng))return;const icon=L.divIcon({className:'hazard-marker',html:'<div style="background:'+t.color+';color:#020617;border:2px solid white;border-radius:9999px;width:30px;height:30px;display:flex;align-items:center;justify-content:center;font-weight:900;box-shadow:0 2px 8px #0009">'+(h.type==='etle'?'E':h.type==='police'?'P':'!')+'</div>',iconSize:[30,30],iconAnchor:[15,15]});const popup='<b>'+t.label+'</b><br>'+(t.permanent?'Tag permanen':'Berlaku sampai '+new Date(h.expiresAt).toLocaleTimeString('id-ID'))+'<br>Ditandai oleh '+String(h.senderName||'Rider').replace(/[&<>"']/g,'');if(!state.hazardMarkers[id])state.hazardMarkers[id]=L.marker([h.lat,h.lng],{icon,zIndexOffset:1000}).bindPopup(popup).addTo(state.map);else{state.hazardMarkers[id].setLatLng([h.lat,h.lng]);state.hazardMarkers[id].setIcon(icon);state.hazardMarkers[id].setPopupContent(popup);}});Object.keys(state.hazardMarkers).forEach(id=>{if(!active.has(id)){state.map.removeLayer(state.hazardMarkers[id]);delete state.hazardMarkers[id];}});}
+function playHazardBeeps(){const ctx=getSharedAudioContext();if(!ctx)return;if(ctx.state==='suspended')ctx.resume().catch(()=>{});const base=ctx.currentTime+0.05;for(let i=0;i<3;i++){const o=ctx.createOscillator(),g=ctx.createGain(),t=base+i*0.32;o.type='sine';o.frequency.setValueAtTime(880,t);g.gain.setValueAtTime(0.0001,t);g.gain.linearRampToValueAtTime(0.16,t+0.02);g.gain.exponentialRampToValueAtTime(0.0001,t+0.16);o.connect(g);g.connect(ctx.destination);o.start(t);o.stop(t+0.18);}}
+function showHazardToast(h,d){const box=document.getElementById('hazardAlertToast'),label=document.getElementById('hazardAlertLabel'),dist=document.getElementById('hazardAlertDistance');if(!box||!label||!dist)return;label.textContent=HAZARD_TYPES[h.type]?.label||'Bahaya';dist.textContent=d>=1000?'Sekitar '+(d/1000).toFixed(1)+' km':'Sekitar '+Math.max(0,Math.round(d))+' m';box.classList.remove('hidden');clearTimeout(showHazardToast.timer);showHazardToast.timer=setTimeout(()=>box.classList.add('hidden'),8000);}
+function checkHazardProximity(){if(!state.myProfile)return;const room=(state.roomCode||'TOURING-1').replace(/[^A-Z0-9_-]/gi,'');const key='touring_hazard_alerted_'+room+'_'+state.myProfile.id;let alerted={};try{alerted=JSON.parse(localStorage.getItem(key)||'{}');}catch(e){}let changed=false;Object.values(state.hazards).forEach(h=>{if(!HAZARD_TYPES[h.type]||(h.expiresAt&&Date.now()>=h.expiresAt))return;const d=calculateDistanceMeters(state.myCoords.lat,state.myCoords.lng,h.lat,h.lng);if(d<=1000&&!alerted[h.id]){alerted[h.id]=Date.now();changed=true;playHazardBeeps();showHazardToast(h,d);}});if(changed)try{localStorage.setItem(key,JSON.stringify(alerted));}catch(e){}}
+function publishHazard(type,offsetMeters,policeMinutes){const meta=HAZARD_TYPES[type];if(!meta||!state.myProfile||!isGpsActive||!state.mqttClient?.connected)return false;const id='haz-'+Date.now()+'-'+Math.random().toString(36).slice(2,7),clean=(state.roomCode||'TOURING-1').replace(/[^A-Z0-9_-]/gi,'');const tag={id,type,lat:state.myCoords.lat,lng:state.myCoords.lng,senderName:state.myProfile.name||'Rider',createdAt:Date.now(),expiresAt:meta.permanent?null:Date.now()+(Number(policeMinutes)===60?60:30)*60000};state.hazards[id]=tag;renderHazardMarkers();const key='touring_hazard_alerted_'+clean+'_'+state.myProfile.id;try{const alerted=JSON.parse(localStorage.getItem(key)||'{}');alerted[id]=Date.now();localStorage.setItem(key,JSON.stringify(alerted));}catch(e){}state.mqttClient.publish(roomTopicBase(clean)+'/hazards/'+id,JSON.stringify(tag),{qos:1,retain:true});return true;}
+function removeExpiredHazards(){Object.values(state.hazards).forEach(h=>{if(h.expiresAt&&Date.now()>=h.expiresAt){delete state.hazards[h.id];const clean=(state.roomCode||'TOURING-1').replace(/[^A-Z0-9_-]/gi,'');state.mqttClient?.publish(roomTopicBase(clean)+'/hazards/'+h.id,'',{qos:1,retain:true});}});renderHazardMarkers();}
+setInterval(()=>{removeExpiredHazards();checkHazardProximity();},5000);
 
 function refreshCloudConvoy() {
   const now = Date.now();
@@ -544,7 +564,7 @@ function sendPingTest(isAuto = false) {
     return;
   }
   const cleanRoom = (state.roomCode || 'TOURING-1').replace(/[^A-Z0-9_-]/gi, '');
-  const topicPing = `touringmate/rooms/${cleanRoom}/ping`;
+  const topicPing = `${roomTopicBase(cleanRoom)}/ping`;
   const t0 = Date.now();
   const pingNonce = 'ping-' + t0 + '-' + Math.random().toString(36).substring(2, 6);
   state.pendingPing = { nonce: pingNonce, startTime: t0, isAuto: !!isAuto };
@@ -638,7 +658,6 @@ function loadProfile() {
       role: isLocalhost ? 'LEADER' : 'MEMBER',
       isMaster: isLocalhost
     };
-    saveProfile(state.myProfile);
   }
 
   // Load koordinat terakhir tersimpan agar peta langsung terbuka di lokasi pengendara
@@ -654,10 +673,14 @@ function loadProfile() {
   }
 
   updateProfileUI();
+  if (state.myProfile) {
+    const vals={inputName:state.myProfile.name,inputPlate:state.myProfile.plate,inputVehicle:state.myProfile.vehicle,inputRole:state.myProfile.role,inputRoomPassword:state.myProfile.roomPassword};
+    Object.entries(vals).forEach(([id,v])=>{const el=document.getElementById(id);if(el&&v)el.value=v;});
+  }
 
   // Auto-masuk langsung ke peta tanpa memblokir layar dengan modal registrasi
   const modal = document.getElementById('profileModal');
-  if (modal) modal.classList.add('hidden');
+  if (modal) { if (state.myProfile?.roomPassword) modal.classList.add('hidden'); else modal.classList.remove('hidden'); }
   document.getElementById('btnCloseModal')?.classList.remove('hidden');
 }
 
@@ -703,9 +726,10 @@ function updateProfileUI() {
 
 // Real-time synchronization loop with server & Cloud MQTT
 async function syncWithServer(customAction = 'update', extraData = {}) {
+  if (!state.myProfile?.roomPassword) return;
   const cleanRoom = (state.roomCode || 'TOURING-1').replace(/[^A-Z0-9_-]/gi, '');
-  const topicLocation = `touringmate/rooms/${cleanRoom}/loc`;
-  const topicControl = `touringmate/rooms/${cleanRoom}/ctl`;
+  const topicLocation = `${roomTopicBase(cleanRoom)}/loc`;
+  const topicControl = `${roomTopicBase(cleanRoom)}/ctl`;
 
   // 1. Broadcast over Cloud MQTT (Works 100% on Static Sites like GitHub Pages!)
   if (state.mqttClient && state.mqttClient.connected) {
@@ -910,6 +934,7 @@ function initMap() {
   state.map.on('dragstart', () => {
     state.isAutoFollowMap = false;
   });
+  renderHazardMarkers();
 }
 
 function updateMapMarkers() {
@@ -1035,6 +1060,7 @@ function handleGpsPosition(position) {
 
   updateMapMarkers();
   renderRoster();
+  checkHazardProximity();
 }
 
 function handleGpsError(err) {
@@ -1312,7 +1338,7 @@ function renderLeftHUD(processedRiders) {
       const newMuted = !rider.isMutedByHost;
       const cleanRoom = (state.roomCode || 'TOURING-1').replace(/[^A-Z0-9_-]/gi, '');
       if (state.mqttClient && state.mqttClient.connected) {
-        state.mqttClient.publish(`touringmate/rooms/${cleanRoom}/ctl`, JSON.stringify({
+        state.mqttClient.publish(`${roomTopicBase(cleanRoom)}/ctl`, JSON.stringify({
           action: 'mute_rider', targetId: rider.id, muted: newMuted
         }));
       }
@@ -1488,6 +1514,7 @@ function initEventListeners() {
       document.getElementById('inputName').value = state.myProfile.name;
       document.getElementById('inputPlate').value = state.myProfile.plate;
       document.getElementById('inputVehicle').value = state.myProfile.vehicle;
+      document.getElementById('inputRoomPassword').value = state.myProfile.roomPassword || '';
       document.getElementById('inputRole').value = state.myProfile.role;
       if (document.getElementById('inputRoomCode')) {
         document.getElementById('inputRoomCode').value = state.roomCode || 'TOURING-1';
@@ -1501,33 +1528,27 @@ function initEventListeners() {
   };
   document.getElementById('btnOpenEditProfile')?.addEventListener('click', openModal);
   document.getElementById('btnHeaderProfile')?.addEventListener('click', openModal);
-  document.getElementById('btnCloseModal')?.addEventListener('click', () => modal?.classList.add('hidden'));
+  document.getElementById('btnCloseModal')?.addEventListener('click', () => { if (state.myProfile?.roomPassword) modal?.classList.add('hidden'); });
 
-  document.getElementById('profileForm')?.addEventListener('submit', (e) => {
+  document.getElementById('profileForm')?.addEventListener('submit', e => {
     e.preventDefault();
-    const isMasterSelected = document.getElementById('modeMaster') ? document.getElementById('modeMaster').checked : false;
-    const roomInput = document.getElementById('inputRoomCode');
-    const newRoom = roomInput ? roomInput.value.trim().toUpperCase() : 'TOURING-1';
-    if (newRoom && newRoom !== state.roomCode) {
-      localStorage.setItem('touring_room', newRoom);
-      switchCloudRoom(newRoom);
-    } else {
-      localStorage.setItem('touring_room', state.roomCode);
-    }
-    const profile = {
-      id: state.myProfile?.id || ('rider-' + Math.random().toString(36).substring(2, 9)),
-      name: document.getElementById('inputName').value.trim(),
-      plate: document.getElementById('inputPlate').value.trim().toUpperCase(),
-      vehicle: document.getElementById('inputVehicle').value.trim(),
-      role: document.getElementById('inputRole').value,
-      isMaster: isMasterSelected
-    };
-    saveProfile(profile);
-    modal.classList.add('hidden');
-    document.getElementById('btnCloseModal')?.classList.remove('hidden');
-    updateMapMarkers();
-    renderRoster();
+    const room=(document.getElementById('inputRoomCode')?.value||state.roomCode).trim().toUpperCase();
+    const oldRoom=state.roomCode, oldPass=state.myProfile?.roomPassword||'';
+    const profile={id:state.myProfile?.id||('rider-'+Math.random().toString(36).slice(2,9)),name:document.getElementById('inputName').value.trim(),plate:document.getElementById('inputPlate').value.trim().toUpperCase(),vehicle:document.getElementById('inputVehicle').value.trim(),role:document.getElementById('inputRole').value,isMaster:!!document.getElementById('modeMaster')?.checked,roomPassword:document.getElementById('inputRoomPassword').value.trim()};
+    if(oldPass&&profile.roomPassword!==oldPass&&!state.myProfile?.isMaster){alert('Hanya Master yang dapat mengganti password rombongan.');document.getElementById('inputRoomPassword').value=oldPass;return;}
+    const passChanged=profile.roomPassword!==oldPass;
+    if(passChanged&&state.mqttClient){try{state.mqttClient.end(true);}catch(e){}state.mqttClient=null;}
+    saveProfile(profile);localStorage.setItem('touring_room',room);
+    if(passChanged){state.roomCode=room;state.hazards={};state.activeCloudRiders={};renderHazardMarkers();updateBrowserUrlWithRoom(room);initCloudMqtt();}
+    else if(room!==oldRoom)switchCloudRoom(room);
+    modal?.classList.add('hidden');document.getElementById('btnCloseModal')?.classList.remove('hidden');updateMapMarkers();renderRoster();
   });
+
+  document.getElementById('btnOpenHazardModal')?.addEventListener('click',()=>document.getElementById('hazardModal')?.classList.remove('hidden'));
+  document.getElementById('btnCloseHazardModal')?.addEventListener('click',()=>document.getElementById('hazardModal')?.classList.add('hidden'));
+  document.getElementById('btnCloseHazardToast')?.addEventListener('click',()=>document.getElementById('hazardAlertToast')?.classList.add('hidden'));
+  const hType=document.getElementById('hazardType');hType?.addEventListener('change',()=>document.getElementById('policeDurationWrap')?.classList.toggle('hidden',hType.value!=='police'));
+  document.getElementById('hazardForm')?.addEventListener('submit',e=>{e.preventDefault();if(!publishHazard(hType?.value,0,document.getElementById('policeDuration')?.value)){alert(!isGpsActive?'Nyalakan GPS terlebih dahulu.':'Belum terhubung ke room. Periksa password dan internet.');return;}document.getElementById('hazardModal')?.classList.add('hidden');});
 
   // Add custom rider button
   document.getElementById('btnAddNewRider')?.addEventListener('click', () => {
@@ -2263,7 +2284,7 @@ function initEventListeners() {
       return;
     }
     const cleanRoom = (state.roomCode || 'TOURING-1').replace(/[^A-Z0-9_-]/gi, '');
-    const topicVoice = `touringmate/rooms/${cleanRoom}/voice`;
+    const topicVoice = `${roomTopicBase(cleanRoom)}/voice`;
 
     const myName = state.myProfile ? state.myProfile.name : 'Saya';
     const myId = state.myProfile ? state.myProfile.id : state.mqttClientId;
@@ -2535,7 +2556,7 @@ function initEventListeners() {
       const newMuted = !currentMuted;
       if (state.mqttClient && state.mqttClient.connected) {
         const cleanRoom = (state.roomCode || 'TOURING-1').replace(/[^A-Z0-9_-]/gi, '');
-        state.mqttClient.publish(`touringmate/rooms/${cleanRoom}/ctl`, JSON.stringify({
+        state.mqttClient.publish(`${roomTopicBase(cleanRoom)}/ctl`, JSON.stringify({
           action: 'mute_rider',
           targetId: riderId,
           muted: newMuted
@@ -2555,7 +2576,7 @@ function initEventListeners() {
       isAllMuted = !isAllMuted;
       if (state.mqttClient && state.mqttClient.connected) {
         const cleanRoom = (state.roomCode || 'TOURING-1').replace(/[^A-Z0-9_-]/gi, '');
-        state.mqttClient.publish(`touringmate/rooms/${cleanRoom}/ctl`, JSON.stringify({
+        state.mqttClient.publish(`${roomTopicBase(cleanRoom)}/ctl`, JSON.stringify({
           action: 'mute_all',
           muted: isAllMuted
         }));
@@ -2716,7 +2737,7 @@ function initEventListeners() {
     }
 
     const cleanRoom = (state.roomCode || 'TOURING-1').replace(/[^A-Z0-9_-]/gi, '');
-    const topicChat = `touringmate/rooms/${cleanRoom}/chat`;
+    const topicChat = `${roomTopicBase(cleanRoom)}/chat`;
 
     const myName = state.myProfile ? state.myProfile.name : 'Saya';
     const myId = state.myProfile ? state.myProfile.id : state.mqttClientId;
