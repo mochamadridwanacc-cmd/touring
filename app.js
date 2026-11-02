@@ -15,22 +15,18 @@ const state = {
   mapMarkers: {},
   wakeLock: null,
   isVoiceActive: true,
-  isCameraActive: false,
-  autoScanEnabled: true,
-  scanIntervalSeconds: 10,
-  scanCountdown: 10,
-  timerInterval: null,
-  isOcrBusy: false,
   isSimulationActive: false,
   simInterval: null,
-  tesseractWorker: null,
   micMode: 'PTT', // 'PTT' | 'ALWAYS_ON' | 'VOX'
   voxThreshold: -35, // dB
   isMutedByHost: false,
   chatHistory: [],
   unreadChatCount: 0,
   mqttClientId: 'tm-' + Date.now() + '-' + Math.random().toString(36).substring(2, 9),
-  mqttBrokerName: ''
+  mqttBrokerName: '',
+  hasFirstGpsLock: false,
+  isAutoFollowMap: true,
+  lastPingRtt: null
 };
 
 // Preset Convoy Members (Dummies initialized by Master if needed)
@@ -78,12 +74,13 @@ document.addEventListener('DOMContentLoaded', async () => {
 
   loadProfile();
   initMap();
+  updateMapMarkers();
+  renderRoster();
   initGeolocation();
   initWakeLock();
   initEventListeners();
   initVoiceIntercom();
   initAudioContextUnlock();
-  startCamera();
 
   // Check for HTTPS on mobile devices
   if (location.protocol !== 'https:' && location.hostname !== 'localhost' && location.hostname !== '127.0.0.1') {
@@ -118,12 +115,14 @@ function updateMqttStatusUI(status, detail) {
   }
 
   if (status === 'connected') {
+    const pingStr = state.lastPingRtt !== null ? ` • ${state.lastPingRtt}ms` : '';
     if (statusEl) {
       statusEl.className = 'text-[10px] text-emerald-400 flex items-center gap-1 font-mono';
-      statusEl.innerHTML = `<span class="w-1.5 h-1.5 rounded-full bg-emerald-500 animate-pulse"></span> Cloud Terhubung (${detail || state.mqttBrokerName || 'Live'})`;
+      statusEl.innerHTML = `<span class="w-1.5 h-1.5 rounded-full bg-emerald-500 animate-pulse"></span> Cloud Terhubung (${detail || (state.mqttBrokerName + pingStr) || 'Live'})`;
     }
     if (syncInd) {
-      syncInd.innerHTML = `<span class="w-1.5 h-1.5 rounded-full bg-emerald-500 animate-pulse"></span> Cloud Live (${state.roomCode})`;
+      const pingBadge = state.lastPingRtt !== null ? `${state.lastPingRtt}ms` : state.roomCode;
+      syncInd.innerHTML = `<span class="w-1.5 h-1.5 rounded-full bg-emerald-500 animate-pulse"></span> Cloud Live (${pingBadge})`;
     }
   } else if (status === 'connecting') {
     if (statusEl) {
@@ -225,6 +224,10 @@ function initCloudMqtt() {
         } else {
           console.log('[MQTT] Subscribed to room topics for:', cleanRoom);
           syncWithServer('update');
+          // Auto ping cloud langsung saat aplikasi dibuka & terhubung
+          setTimeout(() => {
+            sendPingTest(true);
+          }, 350);
         }
       });
     });
@@ -315,8 +318,17 @@ function initCloudMqtt() {
           if (msg && msg.pingNonce) {
             if (msg.senderClientId === state.mqttClientId && state.pendingPing && state.pendingPing.nonce === msg.pingNonce) {
               const rtt = Date.now() - state.pendingPing.startTime;
+              const wasAuto = state.pendingPing.isAuto;
               state.pendingPing = null;
-              alert(`⚡ Ping Berhasil!\nBroker: ${state.mqttBrokerName}\nLatency Round-Trip Asli: ${rtt} ms\nRoom: ${state.roomCode}`);
+              state.lastPingRtt = rtt;
+
+              updateMqttStatusUI('connected', `${rtt}ms • ${state.mqttBrokerName}`);
+
+              if (!wasAuto) {
+                alert(`⚡ Ping Berhasil!\nBroker: ${state.mqttBrokerName}\nLatency respon: ~${rtt} ms\nRoom: ${state.roomCode}`);
+              } else {
+                console.log(`[MQTT Auto-Ping] Latency: ${rtt} ms`);
+              }
             } else if (msg.senderClientId !== state.mqttClientId) {
               if (showToastFn) {
                 showToastFn(msg.senderName || 'Rider', `⚡ Mengirim Ping Koneksi (${msg.senderName})!`);
@@ -424,9 +436,59 @@ function refreshCloudConvoy() {
   const syncInd = document.getElementById('serverSyncIndicator');
   if (syncInd) {
     const count = state.riders.length + 1;
-    syncInd.innerHTML = `<span class="w-1.5 h-1.5 rounded-full bg-emerald-500 animate-pulse"></span> Cloud Live (${count} Rider)`;
+    const pingText = state.lastPingRtt !== null ? ` • ${state.lastPingRtt}ms` : '';
+    syncInd.innerHTML = `<span class="w-1.5 h-1.5 rounded-full bg-emerald-500 animate-pulse"></span> Cloud Live (${count} Rider${pingText})`;
   }
 }
+
+function sendPingTest(isAuto = false) {
+  if (!state.mqttClient || !state.mqttClient.connected) {
+    if (!isAuto) {
+      alert('⚠️ Belum terhubung ke Cloud MQTT. Menghubungkan ulang...');
+    }
+    initCloudMqtt();
+    return;
+  }
+  const cleanRoom = (state.roomCode || 'TOURING-1').replace(/[^A-Z0-9_-]/gi, '');
+  const topicPing = `touringmate/rooms/${cleanRoom}/ping`;
+  const t0 = Date.now();
+  const pingNonce = 'ping-' + t0 + '-' + Math.random().toString(36).substring(2, 6);
+  state.pendingPing = { nonce: pingNonce, startTime: t0, isAuto: !!isAuto };
+
+  const myName = state.myProfile ? state.myProfile.name : 'Saya';
+
+  const payload = {
+    senderClientId: state.mqttClientId,
+    senderName: myName,
+    pingNonce,
+    timestamp: t0
+  };
+
+  console.log('[MQTT Ping] Sending ping with nonce:', pingNonce, 'isAuto:', isAuto);
+  state.mqttClient.publish(topicPing, JSON.stringify(payload), { qos: 0 }, (err) => {
+    if (err) {
+      if (!isAuto) alert('Gagal mengirim ping: ' + err.message);
+      state.pendingPing = null;
+    }
+  });
+
+  setTimeout(() => {
+    if (state.pendingPing && state.pendingPing.nonce === pingNonce) {
+      state.pendingPing = null;
+      if (!isAuto) {
+        alert(`⚠️ Ping timeout (4 detik). Broker ${state.mqttBrokerName} belum merespon. Menghubungkan ulang...`);
+      }
+      tryNextBroker();
+    }
+  }, 4000);
+}
+
+// Auto-ping cloud secara berkala tiap 25 detik agar indikator status selalu akurat
+setInterval(() => {
+  if (state.mqttClient && state.mqttClient.connected) {
+    sendPingTest(true);
+  }
+}, 25000);
 
 /* ==========================================================================
    1. USER PROFILE, DEVICE ROLE (MASTER / PESERTA) & REALTIME SYNC
@@ -451,21 +513,52 @@ function loadProfile() {
 
   const saved = localStorage.getItem('touring_profile');
   if (saved) {
-    state.myProfile = JSON.parse(saved);
-    if (!state.myProfile.id) {
-      state.myProfile.id = 'rider-' + Math.random().toString(36).substring(2, 9);
+    try {
+      state.myProfile = JSON.parse(saved);
+      if (!state.myProfile.id) {
+        state.myProfile.id = 'rider-' + Math.random().toString(36).substring(2, 9);
+      }
       saveProfile(state.myProfile);
+    } catch (e) {
+      state.myProfile = null;
     }
-    updateProfileUI();
-  } else {
-    // Default smart role: Localhost/MacBook = Master, iPhone/Mobile = Peserta
-    const isLocalhost = (location.hostname === 'localhost' || location.hostname === '127.0.0.1');
-    if (document.getElementById('modeMaster')) {
-      document.getElementById('modeMaster').checked = isLocalhost;
-      document.getElementById('modePeserta').checked = !isLocalhost;
-    }
-    document.getElementById('profileModal').classList.remove('hidden');
   }
+
+  // Auto-masuk & simpan data peserta: jika belum ada, buatkan profil default langsung tersimpan
+  if (!state.myProfile) {
+    const randomNum = Math.floor(100 + Math.random() * 900);
+    const randomPlate = Math.floor(1000 + Math.random() * 9000);
+    const isLocalhost = (location.hostname === 'localhost' || location.hostname === '127.0.0.1');
+
+    state.myProfile = {
+      id: 'rider-' + Math.random().toString(36).substring(2, 9),
+      name: 'Rider ' + randomNum,
+      plate: 'B ' + randomPlate + ' TRG',
+      vehicle: 'Motor',
+      role: isLocalhost ? 'LEADER' : 'MEMBER',
+      isMaster: isLocalhost
+    };
+    saveProfile(state.myProfile);
+  }
+
+  // Load koordinat terakhir tersimpan agar peta langsung terbuka di lokasi pengendara
+  const savedCoords = localStorage.getItem('touring_last_coords');
+  if (savedCoords) {
+    try {
+      const parsed = JSON.parse(savedCoords);
+      if (parsed.lat && parsed.lng) {
+        state.myCoords.lat = parsed.lat;
+        state.myCoords.lng = parsed.lng;
+      }
+    } catch (e) {}
+  }
+
+  updateProfileUI();
+
+  // Auto-masuk langsung ke peta tanpa memblokir layar dengan modal registrasi
+  const modal = document.getElementById('profileModal');
+  if (modal) modal.classList.add('hidden');
+  document.getElementById('btnCloseModal')?.classList.remove('hidden');
 }
 
 function saveProfile(profile) {
@@ -618,7 +711,19 @@ async function initWakeLock() {
    3. LEAFLET MAP & RIDER MARKERS
    ========================================================================== */
 function initMap() {
-  // Default coordinate (Jakarta Center or fallback)
+  // Load saved last known location from localStorage for instant map centering on startup
+  const savedCoords = localStorage.getItem('touring_last_coords');
+  if (savedCoords) {
+    try {
+      const parsed = JSON.parse(savedCoords);
+      if (parsed.lat && parsed.lng) {
+        state.myCoords.lat = parsed.lat;
+        state.myCoords.lng = parsed.lng;
+      }
+    } catch (e) {}
+  }
+
+  // Coordinate for initial map view
   const defaultPos = [state.myCoords.lat, state.myCoords.lng];
 
   state.map = L.map('map', {
@@ -631,8 +736,10 @@ function initMap() {
     maxZoom: 19
   }).addTo(state.map);
 
-  // Add zoom control at bottom right
-  L.control.zoom({ position: 'bottomright' }).addTo(state.map);
+  // When user manually drags/pans map, stop auto-follow so it doesn't fight the user's manual pan
+  state.map.on('dragstart', () => {
+    state.isAutoFollowMap = false;
+  });
 }
 
 function updateMapMarkers() {
@@ -711,8 +818,19 @@ function initGeolocation() {
     state.myCoords.lng = longitude;
     state.myCoords.speed = speed ? Math.round(speed * 3.6) : 0; // m/s to km/h
 
+    // Simpan koordinat akurat terakhir ke localStorage
+    try {
+      localStorage.setItem('touring_last_coords', JSON.stringify({ lat: latitude, lng: longitude }));
+    } catch (e) {}
+
     document.getElementById('hudSpeed').textContent = state.myCoords.speed;
     document.getElementById('gpsStatusText').innerHTML = '<span class="w-2 h-2 rounded-full bg-emerald-500 animate-pulse"></span> GPS Akurat';
+
+    // Auto-fokus & auto-center langsung ke lokasi GPS sekarang tanpa perlu pencet tombol apapun!
+    if (state.map && (!state.hasFirstGpsLock || state.isAutoFollowMap)) {
+      state.map.setView([latitude, longitude], 17, { animate: !state.hasFirstGpsLock ? false : true });
+      state.hasFirstGpsLock = true;
+    }
 
     updateMapMarkers();
     renderRoster();
@@ -731,12 +849,14 @@ function initGeolocation() {
     document.getElementById('gpsStatusText').innerHTML = `<span class="text-amber-400">${msg}</span>`;
   };
 
-  const geoOptions = { enableHighAccuracy: true, timeout: 15000, maximumAge: 0 };
+  // 1. Kunci posisi instan cepat (<200ms) dari cell tower/wifi cache agar peta langsung melompat ke lokasi Anda
+  navigator.geolocation.getCurrentPosition(handlePosition, () => {}, { enableHighAccuracy: false, timeout: 5000, maximumAge: 60000 });
 
-  // Fast initial lock for iOS
-  navigator.geolocation.getCurrentPosition(handlePosition, handleError, geoOptions);
-  // Continuous watching
-  navigator.geolocation.watchPosition(handlePosition, handleError, geoOptions);
+  // 2. Kunci posisi akurasi tinggi GPS Satelit
+  navigator.geolocation.getCurrentPosition(handlePosition, handleError, { enableHighAccuracy: true, timeout: 15000, maximumAge: 0 });
+
+  // 3. Pantau terus-menerus posisi motor/kendaraan
+  navigator.geolocation.watchPosition(handlePosition, handleError, { enableHighAccuracy: true, timeout: 15000, maximumAge: 0 });
 }
 
 // Haversine distance formula in meters
@@ -761,7 +881,6 @@ function formatDistance(meters) {
 
 function renderRoster() {
   const container = document.getElementById('riderListContainer');
-  if (!container) return;
 
   // Calculate distance for each rider relative to me
   const processedRiders = state.riders.map(rider => {
@@ -769,11 +888,16 @@ function renderRoster() {
     const rLng = (rider.lng !== undefined && rider.lng !== null) ? rider.lng : (state.myCoords.lng + (rider.lngOffset || 0));
     const dist = calculateDistanceMeters(state.myCoords.lat, state.myCoords.lng, rLat, rLng);
     const isAhead = (rider.lat !== undefined && rider.lat !== null) ? (rider.lat >= state.myCoords.lat) : ((rider.latOffset || 0) >= 0);
-    return { ...rider, distance: dist, isAhead };
+    return { ...rider, lat: rLat, lng: rLng, distance: dist, isAhead };
   });
 
   // Sort: Riders in front first (closest to furthest), then riders behind
   processedRiders.sort((a, b) => a.distance - b.distance);
+
+  // Render left transparent participants HUD list ("nge jajar sebelah kiri")
+  renderLeftHUD(processedRiders);
+
+  if (!container) return;
 
   container.innerHTML = '';
   let maxDist = 0;
@@ -844,230 +968,92 @@ function renderRoster() {
 }
 
 /* ==========================================================================
-   5. CAMERA ACCESS & AUTO-CAPTURE PER 10 DETIK (iOS & Android Compatible)
+   5. TRANSPARENT PARTICIPANTS HUD (NGEJAJAR SEBELAH KIRI)
    ========================================================================== */
-async function startCamera() {
-  const video = document.getElementById('cameraFeed');
-  if (!video) return;
+function renderLeftHUD(processedRiders) {
+  const leftContainer = document.getElementById('leftParticipantsList');
+  const countBadge = document.getElementById('leftRiderCount');
+  if (countBadge) {
+    countBadge.textContent = `${state.riders.length + 1}`;
+  }
+  if (!leftContainer) return;
 
-  // iOS Safari/Chrome requirements
-  video.setAttribute('autoplay', '');
-  video.setAttribute('muted', '');
-  video.setAttribute('playsinline', '');
-  video.setAttribute('webkit-playsinline', '');
-  video.muted = true;
+  leftContainer.innerHTML = '';
 
-  if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
-    console.error('MediaDevices not supported or blocked by HTTP on iOS');
-    const warning = document.getElementById('httpsWarningBanner');
-    if (warning) warning.classList.remove('hidden');
-    alert('Kamera diblokir oleh iOS karena tidak menggunakan HTTPS!\nSilakan buka lewat alamat https:// (bukan http://).');
+  // 1. Baris Pengguna Sendiri (Saya) di Paling Atas
+  const myName = state.myProfile?.name || 'Saya';
+  const myPlate = state.myProfile?.plate || 'MY-GPS';
+  const myRole = state.myProfile?.role || 'MEMBER';
+  const myRoleTag = myRole === 'LEADER' ? 'RC' : (myRole === 'SWEEPER' ? 'SW' : (myRole === 'MEDIC' ? 'MED' : 'MBR'));
+  const myRoleColor = myRole === 'LEADER' 
+    ? 'bg-blue-500/25 text-blue-300 border border-blue-500/40' 
+    : (myRole === 'SWEEPER' 
+      ? 'bg-rose-500/25 text-rose-300 border border-rose-500/40' 
+      : (myRole === 'MEDIC' 
+        ? 'bg-red-500/25 text-red-300 border border-red-500/40' 
+        : 'bg-emerald-500/20 text-emerald-300 border border-emerald-500/40'));
+
+  const selfEl = document.createElement('div');
+  selfEl.className = 'cursor-pointer flex items-center justify-between px-2.5 py-1.5 rounded-xl bg-slate-950/45 hover:bg-slate-900/70 backdrop-blur-md border border-emerald-500/40 text-slate-100 shadow-sm transition active:scale-[0.98] group';
+  selfEl.title = 'Klik untuk pusatkan peta ke posisi Saya';
+  selfEl.innerHTML = `
+    <div class="flex items-center gap-1.5 min-w-0 pr-1">
+      <span class="w-2 h-2 rounded-full bg-emerald-400 animate-pulse flex-shrink-0"></span>
+      <span class="px-1 py-0.2 rounded text-[9px] font-bold ${myRoleColor}">${myRoleTag}</span>
+      <span class="font-bold text-xs truncate text-white group-hover:text-amber-300 transition">${myName} <span class="text-[10px] text-emerald-400/90 font-normal">(Saya)</span></span>
+    </div>
+    <span class="font-mono text-[10px] text-slate-300 font-semibold flex-shrink-0">${myPlate}</span>
+  `;
+  selfEl.addEventListener('click', () => {
+    if (state.map) {
+      state.map.setView([state.myCoords.lat, state.myCoords.lng], 17, { animate: true });
+      if (state.mapMarkers['self']) state.mapMarkers['self'].openPopup?.();
+    }
+  });
+  leftContainer.appendChild(selfEl);
+
+  // 2. Baris Anggota Rombongan Lainnya
+  if (processedRiders.length === 0) {
+    const emptyNotice = document.createElement('div');
+    emptyNotice.className = 'px-2 py-1 text-[10px] text-slate-400/70 italic';
+    emptyNotice.textContent = 'Menunggu rider lain...';
+    leftContainer.appendChild(emptyNotice);
     return;
   }
 
-  let stream = null;
+  processedRiders.forEach(rider => {
+    const rRole = rider.role || 'MEMBER';
+    const rRoleTag = rRole === 'LEADER' ? 'RC' : (rRole === 'SWEEPER' ? 'SW' : (rRole === 'MEDIC' ? 'MED' : 'MBR'));
+    const rRoleColor = rRole === 'LEADER' 
+      ? 'bg-blue-500/25 text-blue-300 border border-blue-500/40' 
+      : (rRole === 'SWEEPER' 
+        ? 'bg-rose-500/25 text-rose-300 border border-rose-500/40' 
+        : (rRole === 'MEDIC' 
+          ? 'bg-red-500/25 text-red-300 border border-red-500/40' 
+          : 'bg-slate-800/80 text-slate-300 border border-slate-700/50'));
 
-  // Progressive fallback constraints for mobile iOS/Android
-  const constraintsList = [
-    { video: { facingMode: { ideal: 'environment' }, width: { ideal: 1280 } }, audio: false },
-    { video: { facingMode: 'environment' }, audio: false },
-    { video: true, audio: false }
-  ];
-
-  for (const constraint of constraintsList) {
-    try {
-      stream = await navigator.mediaDevices.getUserMedia(constraint);
-      if (stream) break;
-    } catch (e) {
-      console.warn('Retrying camera constraint:', e.message);
-    }
-  }
-
-  if (stream) {
-    video.srcObject = stream;
-    try {
-      await video.play();
-    } catch (e) {
-      console.warn('Video play triggered:', e);
-    }
-    state.isCameraActive = true;
-    startAutoScanTimer();
-  } else {
-    alert('Tidak dapat mengaktifkan kamera.\nJika Anda menggunakan iPhone:\n1. Buka melalui HTTPS: https://\n2. Klik Izinkan (Allow) saat Safari/Chrome meminta izin Kamera.');
-  }
-}
-
-function stopCamera() {
-  const video = document.getElementById('cameraFeed');
-  if (video.srcObject) {
-    video.srcObject.getTracks().forEach(track => track.stop());
-    video.srcObject = null;
-  }
-  state.isCameraActive = false;
-  clearInterval(state.timerInterval);
-}
-
-function startAutoScanTimer() {
-  clearInterval(state.timerInterval);
-  state.scanCountdown = state.scanIntervalSeconds;
-  updateTimerUI();
-
-  state.timerInterval = setInterval(() => {
-    if (!state.autoScanEnabled || state.isOcrBusy) return;
-
-    state.scanCountdown -= 0.2;
-    if (state.scanCountdown <= 0) {
-      state.scanCountdown = state.scanIntervalSeconds;
-      captureAndRecognizePlate();
-    }
-    updateTimerUI();
-  }, 200);
-}
-
-function updateTimerUI() {
-  const badge = document.getElementById('captureTimerBadge');
-  const bar = document.getElementById('captureProgressBar');
-  if (badge) badge.textContent = `${Math.ceil(state.scanCountdown)}s`;
-  if (bar) {
-    const percent = (state.scanCountdown / state.scanIntervalSeconds) * 100;
-    bar.style.width = `${percent}%`;
-  }
-}
-
-/* ==========================================================================
-   6. CAPTURE FRAME, OCR PROCESSING & MATCHING
-   ========================================================================== */
-async function captureAndRecognizePlate() {
-  const video = document.getElementById('cameraFeed');
-  const canvas = document.getElementById('captureCanvas');
-  const overlay = document.getElementById('ocrStatusOverlay');
-  const laser = document.getElementById('scanLaser');
-
-  if (!video || !video.videoWidth || state.isOcrBusy) return;
-
-  state.isOcrBusy = true;
-  if (overlay) overlay.classList.remove('hidden');
-  if (laser) laser.classList.remove('hidden');
-
-  try {
-    // 1. Capture only the center targeting box (saves ~80% OCR time & boosts accuracy)
-    const vw = video.videoWidth;
-    const vh = video.videoHeight;
-    const cropWidth = Math.round(vw * 0.7);
-    const cropHeight = Math.round(vh * 0.35);
-    const cropX = Math.round((vw - cropWidth) / 2);
-    const cropY = Math.round((vh - cropHeight) / 2);
-
-    canvas.width = cropWidth;
-    canvas.height = cropHeight;
-    const ctx = canvas.getContext('2d');
-    ctx.drawImage(video, cropX, cropY, cropWidth, cropHeight, 0, 0, cropWidth, cropHeight);
-
-    // 2. Preprocess image: Grayscale & Contrast boost for license plates
-    const imgData = ctx.getImageData(0, 0, cropWidth, cropHeight);
-    const d = imgData.data;
-    for (let i = 0; i < d.length; i += 4) {
-      const avg = (d[i] * 0.299 + d[i + 1] * 0.587 + d[i + 2] * 0.114);
-      // High contrast binarization curve
-      const val = avg > 115 ? 255 : 0;
-      d[i] = val;
-      d[i + 1] = val;
-      d[i + 2] = val;
-    }
-    ctx.putImageData(imgData, 0, 0);
-
-    // 3. Perform OCR with Tesseract
-    const result = await Tesseract.recognize(canvas, 'eng', {
-      logger: m => console.log('Tesseract:', m.status, m.progress)
-    });
-
-    const rawText = result.data.text;
-    console.log('OCR Output Text:', rawText);
-
-    // 4. Match with Indonesian License Plate patterns
-    processDetectedText(rawText);
-
-  } catch (err) {
-    console.error('Error during OCR processing:', err);
-  } finally {
-    state.isOcrBusy = false;
-    if (overlay) overlay.classList.add('hidden');
-    if (laser) laser.classList.add('hidden');
-  }
-}
-
-function processDetectedText(text) {
-  if (!text) return;
-
-  // Clean string: uppercase, remove symbols except letters and numbers
-  const cleaned = text.toUpperCase().replace(/[^A-Z0-9\s]/g, ' ');
-  console.log('Cleaned OCR Plate Text:', cleaned);
-
-  // Look for plate matches among registered riders
-  let matchedRider = null;
-
-  for (const rider of state.riders) {
-    const rawRiderPlate = rider.plate.toUpperCase().replace(/\s+/g, '');
-    const searchTarget = cleaned.replace(/\s+/g, '');
-
-    // Check if rider's plate is inside detected text
-    if (searchTarget.includes(rawRiderPlate)) {
-      matchedRider = rider;
-      break;
-    }
-
-    // Secondary check: match numbers & suffix (e.g. "4567 XYZ")
-    const parts = rider.plate.split(' ');
-    if (parts.length >= 2) {
-      const numberPart = parts[1];
-      if (numberPart && searchTarget.includes(numberPart)) {
-        matchedRider = rider;
-        break;
+    const row = document.createElement('div');
+    row.className = 'cursor-pointer flex items-center justify-between px-2.5 py-1.5 rounded-xl bg-slate-950/35 hover:bg-slate-900/65 backdrop-blur-md border border-white/5 hover:border-slate-700/60 text-slate-200 shadow-sm transition active:scale-[0.98] group';
+    row.title = `Klik untuk lihat posisi ${rider.name} (${rider.plate}) di peta`;
+    row.innerHTML = `
+      <div class="flex items-center gap-1.5 min-w-0 pr-1">
+        <span class="px-1 py-0.2 rounded text-[9px] font-bold ${rRoleColor}">${rRoleTag}</span>
+        <span class="font-medium text-xs truncate text-slate-200 group-hover:text-amber-300 transition">${rider.name}</span>
+      </div>
+      <div class="flex items-center gap-1 flex-shrink-0">
+        <span class="font-mono text-[10px] text-amber-300/95 font-bold">${formatDistance(rider.distance)}</span>
+      </div>
+    `;
+    row.addEventListener('click', () => {
+      if (state.map && rider.lat !== undefined && rider.lng !== undefined) {
+        state.map.setView([rider.lat, rider.lng], 17, { animate: true });
+        if (state.mapMarkers[rider.id]) {
+          state.mapMarkers[rider.id].openPopup();
+        }
       }
-    }
-  }
-
-  if (matchedRider) {
-    triggerRiderIdentifiedAlert(matchedRider);
-  }
-}
-
-/* ==========================================================================
-   7. VOICE & HUD ALERTS (Pemberitahuan Suara ke Interkom)
-   ========================================================================== */
-function triggerRiderIdentifiedAlert(rider) {
-  // Play chime sound
-  const audio = document.getElementById('alertAudio');
-  if (audio) {
-    audio.currentTime = 0;
-    audio.play().catch(() => {});
-  }
-
-  // Show visual HUD Card
-  const card = document.getElementById('detectedRiderCard');
-  if (card) {
-    document.getElementById('detectedRiderName').textContent = rider.name;
-    document.getElementById('detectedVehicle').textContent = rider.vehicle;
-    document.getElementById('detectedPlate').textContent = rider.plate;
-    document.getElementById('detectedTime').textContent = new Date().toLocaleTimeString('id-ID', { hour: '2-digit', minute: '2-digit', second: '2-digit' });
-    card.classList.remove('hidden');
-
-    // Auto hide after 8 seconds
-    setTimeout(() => {
-      card.classList.add('hidden');
-    }, 8000);
-  }
-
-  // Web Speech API: Announce to rider's bluetooth helmet intercom
-  if (state.isVoiceActive && 'speechSynthesis' in window) {
-    window.speechSynthesis.cancel(); // Stop previous voice
-    const voiceMsg = `Di depan Anda: ${rider.name}, ${rider.vehicle}.`;
-    const utterance = new SpeechSynthesisUtterance(voiceMsg);
-    utterance.lang = 'id-ID';
-    utterance.rate = 1.05;
-    utterance.pitch = 1.0;
-    window.speechSynthesis.speak(utterance);
-  }
+    });
+    leftContainer.appendChild(row);
+  });
 }
 
 let sharedAudioContext = null;
@@ -1151,6 +1137,7 @@ function toggleSimulation() {
 function initEventListeners() {
   // Recenter map button
   document.getElementById('btnRecenter').addEventListener('click', () => {
+    state.isAutoFollowMap = true;
     if (state.map) {
       state.map.setView([state.myCoords.lat, state.myCoords.lng], 17, { animate: true });
     }
@@ -1165,37 +1152,19 @@ function initEventListeners() {
     drawer.classList.add('translate-x-full');
   });
 
-  // Camera HUD toggles
-  const camHud = document.getElementById('cameraHud');
-  document.getElementById('btnToggleCam').addEventListener('click', () => {
-    if (camHud.classList.contains('hidden')) {
-      camHud.classList.remove('hidden');
-      startCamera();
-    } else {
-      camHud.classList.add('hidden');
-      stopCamera();
-    }
+  // Zoom In (+) and Zoom Out (-) buttons (Persis di bawah tombol PTT)
+  document.getElementById('btnZoomIn')?.addEventListener('click', () => {
+    if (state.map) state.map.zoomIn();
   });
-  document.getElementById('btnCloseCam').addEventListener('click', () => {
-    camHud.classList.add('hidden');
-    stopCamera();
+  document.getElementById('btnZoomOut')?.addEventListener('click', () => {
+    if (state.map) state.map.zoomOut();
   });
 
-  // Auto scan checkbox
-  document.getElementById('toggleAutoScan').addEventListener('change', (e) => {
-    state.autoScanEnabled = e.target.checked;
-  });
-
-  // Manual Scan button
-  document.getElementById('btnManualCapture').addEventListener('click', () => {
-    captureAndRecognizePlate();
-  });
-
-  // Test Demo Scan (Instant simulation button)
-  document.getElementById('btnSimulateScan').addEventListener('click', () => {
-    // Pick random rider from convoy
-    const rider = state.riders[Math.floor(Math.random() * state.riders.length)];
-    triggerRiderIdentifiedAlert(rider);
+  // Floating Chat Button (Kanan Bawah)
+  document.getElementById('btnOpenChatLogFloating')?.addEventListener('click', () => {
+    document.getElementById('chatLogModal')?.classList.remove('hidden');
+    state.unreadChatCount = 0;
+    if (typeof updateUnreadBadges === 'function') updateUnreadBadges();
   });
 
   // Voice mute/unmute
@@ -1230,6 +1199,7 @@ function initEventListeners() {
     modal.classList.remove('hidden');
   };
   document.getElementById('btnOpenEditProfile').addEventListener('click', openModal);
+  document.getElementById('btnHeaderProfile')?.addEventListener('click', openModal);
   document.getElementById('btnCloseModal').addEventListener('click', () => modal.classList.add('hidden'));
 
   document.getElementById('profileForm').addEventListener('submit', (e) => {
@@ -2327,44 +2297,6 @@ function initEventListeners() {
     });
   }
 
-  function sendPingTest() {
-    if (!state.mqttClient || !state.mqttClient.connected) {
-      alert('⚠️ Belum terhubung ke Cloud MQTT. Menghubungkan ulang...');
-      initCloudMqtt();
-      return;
-    }
-    const cleanRoom = (state.roomCode || 'TOURING-1').replace(/[^A-Z0-9_-]/gi, '');
-    const topicPing = `touringmate/rooms/${cleanRoom}/ping`;
-    const t0 = Date.now();
-    const pingNonce = 'ping-' + t0 + '-' + Math.random().toString(36).substring(2, 6);
-    state.pendingPing = { nonce: pingNonce, startTime: t0 };
-
-    const myName = state.myProfile ? state.myProfile.name : 'Saya';
-
-    const payload = {
-      senderClientId: state.mqttClientId,
-      senderName: myName,
-      pingNonce,
-      timestamp: t0
-    };
-
-    console.log('[MQTT Ping] Sending ping with nonce:', pingNonce);
-    state.mqttClient.publish(topicPing, JSON.stringify(payload), { qos: 0 }, (err) => {
-      if (err) {
-        alert('Gagal mengirim ping: ' + err.message);
-        state.pendingPing = null;
-      }
-    });
-
-    setTimeout(() => {
-      if (state.pendingPing && state.pendingPing.nonce === pingNonce) {
-        state.pendingPing = null;
-        alert(`⚠️ Ping timeout (4 detik). Broker ${state.mqttBrokerName} belum merespon. Menghubungkan ulang...`);
-        tryNextBroker();
-      }
-    }, 4000);
-  }
-
   function sendSyntheticBeep() {
     unlockGlobalAudio();
     const sampleRate = 12000;
@@ -2421,7 +2353,7 @@ function initEventListeners() {
   });
 
   document.getElementById('btnSendTestBeep')?.addEventListener('click', sendSyntheticBeep);
-  document.getElementById('btnTestPingMqtt')?.addEventListener('click', sendPingTest);
+  document.getElementById('btnTestPingMqtt')?.addEventListener('click', () => sendPingTest(false));
 
   document.getElementById('chatLogFeed')?.addEventListener('click', (e) => {
     const btn = e.target.closest('.btn-play-voice-item');
@@ -2447,7 +2379,4 @@ function initEventListeners() {
   // Auto-start VOX engine if saved
   if (state.micMode === 'VOX') startVoxEngine();
   else if (state.micMode === 'ALWAYS_ON') startAlwaysOnMode();
-
-  // Auto-start camera in background if supported
-  startCamera();
 }

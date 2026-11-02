@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
-  <title>TouringMate - Realtime Convoy & Plate HUD</title>
+  <title>TouringMate - Realtime Convoy & Intercom HUD</title>
   
   <!-- Tailwind CSS -->
   <script src="https://cdn.tailwindcss.com"></script>
@@ -11,10 +11,7 @@
   <!-- Leaflet Maps CSS & JS -->
   <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
   <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
-  
-  <!-- Tesseract.js untuk OCR Plat Nomor di Browser -->
-  <script src="https://cdn.jsdelivr.net/npm/tesseract.js@5/dist/tesseract.min.js"></script>
-
+ 
   <!-- QRCode.js untuk Generate QR Code Langsung di Browser -->
   <script src="https://cdnjs.cloudflare.com/ajax/libs/qrcodejs/1.0.0/qrcode.min.js"></script>
 
@@ -40,7 +37,7 @@
   <div id="httpsWarningBanner" class="hidden bg-rose-600/90 text-white px-4 py-2 text-xs flex items-center justify-between z-50">
     <div class="flex items-center gap-2">
       <i data-lucide="alert-triangle" class="w-4 h-4 text-amber-300 flex-shrink-0"></i>
-      <span><strong>Perhatian iPhone:</strong> Anda membuka via HTTP. Apple Safari/Chrome memblokir Kamera & GPS jika bukan <strong>HTTPS</strong>. Silakan ganti ke <strong>https://</strong> di address bar!</span>
+      <span><strong>Perhatian iPhone:</strong> Anda membuka via HTTP. Apple Safari/Chrome memblokir Mikrofon Interkom & GPS jika bukan <strong>HTTPS</strong>. Silakan ganti ke <strong>https://</strong> di address bar!</span>
     </div>
     <button onclick="document.getElementById('httpsWarningBanner').classList.add('hidden')" class="text-white hover:text-slate-200 ml-2">✕</button>
   </div>
@@ -59,8 +56,10 @@
           </span>
         </h1>
         <p class="text-[11px] text-slate-400 flex items-center gap-1.5 flex-wrap">
-          <span id="deviceRoleBadge" class="px-1.5 py-0.5 rounded text-[10px] bg-slate-800 text-slate-300 font-bold border border-slate-700">PESERTA</span>
-          <span id="myProfileSummary" class="truncate max-w-[85px] sm:max-w-none">Belum Terdaftar</span>
+          <button id="btnHeaderProfile" class="flex items-center gap-1 hover:text-amber-400 transition" title="Klik untuk edit profil Anda">
+            <span id="deviceRoleBadge" class="px-1.5 py-0.5 rounded text-[10px] bg-slate-800 text-slate-300 font-bold border border-slate-700">PESERTA</span>
+            <span id="myProfileSummary" class="truncate max-w-[95px] sm:max-w-none text-slate-200 font-semibold underline decoration-dotted decoration-slate-600">Belum Terdaftar</span>
+          </button>
           <span id="serverSyncIndicator" class="inline-flex items-center gap-1 text-[10px] text-emerald-400 font-mono">
             <span class="w-1.5 h-1.5 rounded-full bg-emerald-500 animate-ping"></span> Live
           </span>
@@ -69,7 +68,7 @@
     </div>
 
     <!-- Quick Controls -->
-    <div class="flex items-center space-x-2">
+    <div class="flex items-center space-x-1.5 sm:space-x-2">
       <!-- QR Join Button -->
       <button id="btnOpenQrModal" class="px-2.5 py-1.5 rounded-lg bg-emerald-500/15 hover:bg-emerald-500/25 text-emerald-400 border border-emerald-500/30 flex items-center gap-1.5 text-xs font-bold transition shadow-sm" title="Scan QR Code untuk Gabung Rombongan">
         <i data-lucide="qr-code" class="w-4 h-4"></i>
@@ -88,14 +87,8 @@
         <span id="unreadChatBadge" class="hidden px-1.5 py-0.2 bg-rose-500 text-white rounded-full text-[9px] font-bold">1</span>
       </button>
 
-      <!-- Camera HUD Toggle -->
-      <button id="btnToggleCam" class="px-2.5 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-300 border border-slate-700 flex items-center gap-1.5 text-xs font-medium">
-        <i data-lucide="camera" class="w-4 h-4 text-amber-400"></i>
-        <span class="hidden sm:inline">Kamera</span>
-      </button>
-
       <!-- Roster Drawer Toggle -->
-      <button id="btnToggleRoster" class="relative px-3 py-1.5 rounded-lg bg-amber-500 hover:bg-amber-400 text-slate-950 font-bold text-xs flex items-center gap-1.5 shadow-md shadow-amber-500/20">
+      <button id="btnToggleRoster" class="relative px-3 py-1.5 rounded-lg bg-amber-500 hover:bg-amber-400 text-slate-950 font-bold text-xs flex items-center gap-1.5 shadow-md shadow-amber-500/20" title="Buka Detail Rombongan">
         <i data-lucide="users" class="w-4 h-4"></i>
         <span id="rosterCountBadge">1 Rider</span>
       </button>
@@ -107,136 +100,75 @@
     <!-- LEAFLET MAP -->
     <div id="map" class="w-full h-full z-0"></div>
 
-    <!-- FLOATING HUD: CURRENT STATUS & SPEED -->
-    <div class="absolute top-3 left-3 z-20 flex flex-col gap-2 pointer-events-none">
-      <!-- Speed & Heading Badge -->
-      <div class="pointer-events-auto bg-slate-900/85 backdrop-blur-md border border-slate-800 rounded-xl px-3 py-2 shadow-xl flex items-center gap-3">
+    <!-- FLOATING HUD LEFT: SPEED & TRANSPARENT CONVOY PARTICIPANTS LIST -->
+    <div class="absolute top-3 left-3 z-20 flex flex-col gap-2 pointer-events-none max-w-[210px] sm:max-w-[240px]">
+      <!-- Speed & GPS Status Card -->
+      <div class="pointer-events-auto bg-slate-950/45 backdrop-blur-md border border-slate-700/30 rounded-2xl px-3 py-2 shadow-xl flex items-center gap-3">
         <div>
-          <div class="text-[10px] text-slate-400 uppercase tracking-widest font-mono">Speed</div>
-          <div class="text-xl font-black text-amber-400 font-mono"><span id="hudSpeed">0</span> <span class="text-xs font-normal text-slate-400">km/h</span></div>
+          <div class="text-[9px] text-slate-400/80 uppercase tracking-widest font-mono">Speed</div>
+          <div class="text-lg font-black text-amber-400 font-mono leading-none mt-0.5"><span id="hudSpeed">0</span> <span class="text-[10px] font-normal text-slate-400">km/h</span></div>
         </div>
-        <div class="w-px h-7 bg-slate-800"></div>
+        <div class="w-px h-6 bg-slate-700/40"></div>
         <div>
-          <div class="text-[10px] text-slate-400 uppercase tracking-widest font-mono">Status GPS</div>
-          <div id="gpsStatusText" class="text-xs font-semibold text-emerald-400 flex items-center gap-1">
-            <span class="w-2 h-2 rounded-full bg-emerald-500 animate-pulse"></span> Aktif
+          <div class="text-[9px] text-slate-400/80 uppercase tracking-widest font-mono">GPS</div>
+          <div id="gpsStatusText" class="text-[11px] font-semibold text-emerald-400 flex items-center gap-1 leading-none mt-0.5">
+            <span class="w-1.5 h-1.5 rounded-full bg-emerald-500 animate-pulse"></span> Aktif
           </div>
         </div>
       </div>
 
-      <!-- Di Depan Anda Info Card (Detected Alert) -->
-      <div id="detectedRiderCard" class="hidden pointer-events-auto bg-slate-900/90 backdrop-blur-md border-2 border-emerald-500/60 rounded-xl p-3 shadow-2xl max-w-xs transition-all animate-bounce">
-        <div class="flex items-center justify-between text-xs text-emerald-400 font-bold mb-1">
-          <span class="flex items-center gap-1"><i data-lucide="sparkles" class="w-3.5 h-3.5"></i> TERDETEKSI DI DEPAN</span>
-          <span id="detectedTime" class="text-[10px] text-slate-400 font-mono">Baru saja</span>
+      <!-- TRANSPARENT PARTICIPANTS HUD (NGEJAJAR SEBELAH KIRI) -->
+      <div class="pointer-events-auto flex flex-col gap-1.5">
+        <div class="flex items-center justify-between text-[10px] font-mono tracking-wider text-slate-400/90 px-1 font-semibold">
+          <span class="flex items-center gap-1"><i data-lucide="users" class="w-3 h-3 text-amber-400"></i> PESERTA:</span>
+          <span id="leftRiderCount" class="text-amber-400 font-bold">1</span>
         </div>
-        <div class="text-sm font-bold text-slate-100" id="detectedRiderName">Dimas Prasetyo</div>
-        <div class="text-xs text-slate-300 flex items-center justify-between mt-1">
-          <span id="detectedVehicle">Kawasaki Versys 650</span>
-          <span class="bg-emerald-500/20 text-emerald-300 border border-emerald-500/40 px-1.5 py-0.5 rounded text-[11px] font-mono font-bold" id="detectedPlate">B 4567 XYZ</span>
+        <div id="leftParticipantsList" class="flex flex-col gap-1 max-h-[55vh] overflow-y-auto no-scrollbar">
+          <!-- Dynamic list of participants rendered by renderRoster() -->
         </div>
       </div>
     </div>
 
-    <!-- MAP CONTROLS (RIGHT SIDE) -->
-    <div class="absolute top-3 right-3 z-20 flex flex-col gap-2">
-      <button id="btnRecenter" class="w-10 h-10 rounded-xl bg-slate-900/90 hover:bg-slate-800 text-slate-200 border border-slate-700/80 shadow-lg flex items-center justify-center transition" title="Pusatkan Peta ke Saya">
-        <i data-lucide="crosshair" class="w-5 h-5 text-amber-400"></i>
-      </button>
-      <button id="btnSimulationToggle" class="w-10 h-10 rounded-xl bg-slate-900/90 hover:bg-slate-800 text-slate-200 border border-slate-700/80 shadow-lg flex items-center justify-center transition" title="Simulasi Rombongan Konvoi (Untuk Tes)">
-        <i data-lucide="play-circle" class="w-5 h-5 text-cyan-400"></i>
-      </button>
-    </div>
-
-    <!-- CAMERA HUD PIP (FLOATING OVERLAY) -->
-    <div id="cameraHud" class="absolute bottom-4 left-4 z-20 w-72 sm:w-80 bg-slate-900/95 backdrop-blur-md border border-slate-700/80 rounded-2xl shadow-2xl overflow-hidden transition-all duration-300">
-      <!-- Camera Header -->
-      <div class="px-3 py-2 bg-slate-800/90 border-b border-slate-700 flex items-center justify-between">
-        <div class="flex items-center gap-1.5 text-xs font-semibold text-slate-200">
-          <i data-lucide="scan" class="w-4 h-4 text-amber-400"></i>
-          <span>Auto Plate Scanner</span>
-        </div>
-        <div class="flex items-center gap-2">
-          <!-- Countdown indicator -->
-          <span id="captureTimerBadge" class="text-[11px] font-mono bg-amber-500/20 text-amber-400 px-1.5 py-0.5 rounded border border-amber-500/30">10s</span>
-          <button id="btnCloseCam" class="text-slate-400 hover:text-slate-200">
-            <i data-lucide="x" class="w-4 h-4"></i>
-          </button>
-        </div>
-      </div>
-
-      <!-- Video Feed & Targeting Reticle -->
-      <div class="relative bg-black h-44 flex items-center justify-center overflow-hidden">
-        <video id="cameraFeed" autoplay playsinline webkit-playsinline muted class="w-full h-full object-cover"></video>
-        <canvas id="captureCanvas" class="hidden"></canvas>
-
-        <!-- Targeting Grid for Plate -->
-        <div class="absolute inset-0 pointer-events-none flex flex-col items-center justify-center">
-          <div class="w-44 h-16 border-2 border-dashed border-amber-400/80 rounded-lg bg-amber-400/10 flex items-center justify-center">
-            <span class="text-[9px] font-mono tracking-widest text-amber-300 bg-slate-950/80 px-1 rounded">POSISI PLAT DEPAN</span>
-          </div>
-          <!-- Scanning Laser line -->
-          <div id="scanLaser" class="hidden absolute top-1/2 w-48 h-0.5 bg-gradient-to-r from-transparent via-emerald-400 to-transparent animate-pulse"></div>
-        </div>
-
-        <!-- Scanning Spinner / Status -->
-        <div id="ocrStatusOverlay" class="hidden absolute inset-0 bg-slate-950/70 backdrop-blur-xs flex flex-col items-center justify-center text-xs text-amber-300">
-          <i data-lucide="loader-2" class="w-6 h-6 animate-spin mb-1 text-amber-400"></i>
-          <span id="ocrStatusText">Menganalisis Plat Nomor...</span>
-        </div>
-      </div>
-
-      <!-- Camera Action Bar -->
-      <div class="p-2.5 bg-slate-900 border-t border-slate-800 space-y-2">
-        <div class="flex items-center justify-between text-xs">
-          <span class="text-slate-400">Auto Scan per 10s:</span>
-          <label class="relative inline-flex items-center cursor-pointer">
-            <input type="checkbox" id="toggleAutoScan" checked class="sr-only peer">
-            <div class="w-9 h-5 bg-slate-700 peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-slate-300 after:border after:rounded-full after:h-4 after:w-4 after:transition-all peer-checked:bg-emerald-500"></div>
-          </label>
-        </div>
-
-        <!-- Progress Bar for 10s Timer -->
-        <div class="w-full bg-slate-800 rounded-full h-1.5 overflow-hidden">
-          <div id="captureProgressBar" class="bg-amber-400 h-1.5 w-full transition-all duration-100"></div>
-        </div>
-
-        <div class="grid grid-cols-2 gap-2 pt-1">
-          <button id="btnManualCapture" class="py-1.5 px-2 bg-slate-800 hover:bg-slate-700 text-slate-200 rounded-lg text-xs font-semibold flex items-center justify-center gap-1 border border-slate-700 transition">
-            <i data-lucide="camera" class="w-3.5 h-3.5 text-amber-400"></i> Scan Sekarang
-          </button>
-          <button id="btnSimulateScan" class="py-1.5 px-2 bg-cyan-950/60 hover:bg-cyan-900/60 text-cyan-300 rounded-lg text-xs font-semibold flex items-center justify-center gap-1 border border-cyan-800/60 transition" title="Tes scan plat motor rombongan tanpa kamera">
-            <i data-lucide="zap" class="w-3.5 h-3.5 text-cyan-400"></i> Tes Demo Plat
-          </button>
-        </div>
-      </div>
-    </div>
-
-    <!-- PTT (PUSH-TO-TALK) FLOATING INTERCOM BUTTON & CONTROLS -->
-    <div class="absolute bottom-6 right-6 z-20 flex flex-col items-center gap-2">
-      <!-- Status Badge -->
-      <div id="pttStatusIndicator" class="hidden px-2.5 py-1 rounded-full bg-rose-500/90 text-white text-[10px] font-bold tracking-wider animate-pulse shadow-lg flex items-center gap-1.5">
+    <!-- CENTER-RIGHT THUMB ACTION BAR: RECENTER + PTT + MIC SETTINGS + ZOOM -->
+    <div class="absolute right-3.5 top-1/2 -translate-y-1/2 z-20 flex flex-col items-center gap-2.5">
+      <!-- Status Badge for PTT Recording / VOX -->
+      <div id="pttStatusIndicator" class="hidden px-2.5 py-1 rounded-full bg-rose-500/90 text-white text-[10px] font-bold tracking-wider animate-pulse shadow-lg flex items-center gap-1.5 whitespace-nowrap">
         <span class="w-2 h-2 rounded-full bg-white animate-ping"></span> <span id="pttStatusText">MEREKAM...</span>
       </div>
 
-      <div class="flex items-center gap-2">
-        <!-- Chat & Voice History Floating Button -->
-        <button id="btnOpenChatLogFloating" class="w-10 h-10 rounded-full bg-slate-900/95 hover:bg-slate-800 border border-cyan-500/40 text-cyan-400 shadow-xl flex items-center justify-center transition active:scale-95 relative" title="Riwayat Percakapan & Interkom">
-          <i data-lucide="message-square" class="w-4 h-4"></i>
-          <span id="unreadChatBadgeFloating" class="hidden absolute -top-1 -right-1 w-2.5 h-2.5 bg-rose-500 rounded-full"></span>
-        </button>
+      <!-- Recenter GPS Map Button -->
+      <button id="btnRecenter" class="w-11 h-11 rounded-2xl bg-slate-900/80 hover:bg-slate-800 text-slate-200 border border-slate-700/50 shadow-xl flex items-center justify-center transition active:scale-95 backdrop-blur-md" title="Pusatkan Peta ke Posisi Saya">
+        <i data-lucide="crosshair" class="w-5 h-5 text-amber-400"></i>
+      </button>
 
-        <!-- Settings Mic Button -->
-        <button id="btnOpenMicModal" class="w-10 h-10 rounded-full bg-slate-900/95 hover:bg-slate-800 border border-slate-700 text-slate-300 shadow-xl flex items-center justify-center transition active:scale-95" title="Pengaturan Mic (PTT / Always ON / VOX Desibel)">
-          <i data-lucide="sliders" class="w-4 h-4 text-emerald-400"></i>
-        </button>
+      <!-- Main PTT Button (Tengah Kanan) -->
+      <button id="btnPtt" class="w-16 h-16 rounded-full bg-slate-900/95 hover:bg-slate-800 border-2 border-emerald-500/90 text-emerald-400 shadow-2xl flex flex-col items-center justify-center transition-all transform active:scale-95 group focus:outline-none select-none backdrop-blur-md" title="Interkom Suara (Tekan untuk Bicara)">
+        <i id="pttIcon" data-lucide="mic" class="w-6 h-6 transition-transform group-hover:scale-110"></i>
+        <span id="pttLabel" class="text-[9px] font-bold tracking-wider uppercase mt-0.5 font-mono text-slate-300">PTT</span>
+      </button>
 
-        <!-- Main Mic Button -->
-        <button id="btnPtt" class="w-16 h-16 rounded-full bg-slate-900/95 hover:bg-slate-800 border-2 border-emerald-500/80 text-emerald-400 shadow-2xl flex flex-col items-center justify-center transition-all transform active:scale-95 group focus:outline-none select-none" title="Interkom Suara Rombongan">
-          <i id="pttIcon" data-lucide="mic" class="w-6 h-6 transition-transform group-hover:scale-110"></i>
-          <span id="pttLabel" class="text-[9px] font-bold tracking-wider uppercase mt-0.5 font-mono text-slate-300">PTT</span>
+      <!-- Mic Mode / VOX Threshold Settings Button -->
+      <button id="btnOpenMicModal" class="w-10 h-10 rounded-2xl bg-slate-900/80 hover:bg-slate-800 border border-slate-700/50 text-slate-300 shadow-xl flex items-center justify-center transition active:scale-95 backdrop-blur-md" title="Pengaturan Mic (PTT / Open Mic / VOX Desibel)">
+        <i data-lucide="sliders" class="w-4 h-4 text-emerald-400"></i>
+      </button>
+
+      <!-- Zoom In (+) and Zoom Out (-) Buttons (Persis Dibawah PTT) -->
+      <div class="flex flex-col bg-slate-900/80 backdrop-blur-md border border-slate-700/50 rounded-2xl shadow-xl overflow-hidden divide-y divide-slate-800/80">
+        <button id="btnZoomIn" class="w-11 h-11 flex items-center justify-center text-slate-200 hover:text-white hover:bg-slate-800/80 active:bg-slate-700 transition" title="Perbesar Peta (+)">
+          <i data-lucide="plus" class="w-5 h-5 text-slate-200"></i>
+        </button>
+        <button id="btnZoomOut" class="w-11 h-11 flex items-center justify-center text-slate-200 hover:text-white hover:bg-slate-800/80 active:bg-slate-700 transition" title="Perkecil Peta (-)">
+          <i data-lucide="minus" class="w-5 h-5 text-slate-200"></i>
         </button>
       </div>
+    </div>
+
+    <!-- FLOATING CHAT BUTTON (BOTTOM RIGHT) -->
+    <div class="absolute bottom-4 right-3.5 z-20">
+      <button id="btnOpenChatLogFloating" class="w-11 h-11 rounded-2xl bg-slate-900/85 hover:bg-slate-800 border border-cyan-500/40 text-cyan-400 shadow-xl flex items-center justify-center transition active:scale-95 relative backdrop-blur-md" title="Riwayat Percakapan & Interkom">
+        <i data-lucide="message-square" class="w-5 h-5"></i>
+        <span id="unreadChatBadgeFloating" class="hidden absolute -top-1 -right-1 w-3 h-3 bg-rose-500 rounded-full border-2 border-slate-900"></span>
+      </button>
     </div>
 
     <!-- VOICE INCOMING BROADCAST TOAST -->
@@ -333,17 +265,17 @@
     </div>
   </aside>
 
-  <!-- REGISTRATION / PROFILE MODAL -->
-  <div id="profileModal" class="fixed inset-0 bg-slate-950/80 backdrop-blur-sm z-50 flex items-center justify-center p-4">
+  <!-- REGISTRATION / PROFILE MODAL (AUTO MASUK & CLICK TO EDIT) -->
+  <div id="profileModal" class="hidden fixed inset-0 bg-slate-950/85 backdrop-blur-md z-50 flex items-center justify-center p-4">
     <div class="bg-slate-900 border border-slate-800 w-full max-w-md rounded-2xl shadow-2xl overflow-hidden animate-in fade-in zoom-in-95 duration-200">
       <div class="px-6 py-4 border-b border-slate-800 flex items-center justify-between">
         <div class="flex items-center gap-2">
           <div class="w-8 h-8 rounded-lg bg-amber-500/20 text-amber-400 flex items-center justify-center">
             <i data-lucide="shield" class="w-4 h-4"></i>
           </div>
-          <h3 class="font-bold text-slate-100 text-base">Registrasi Pengendara</h3>
+          <h3 class="font-bold text-slate-100 text-base">Profil Pengendara</h3>
         </div>
-        <button id="btnCloseModal" class="hidden text-slate-400 hover:text-slate-200">
+        <button id="btnCloseModal" class="text-slate-400 hover:text-slate-200 p-1.5 rounded-lg hover:bg-slate-800 transition">
           <i data-lucide="x" class="w-5 h-5"></i>
         </button>
       </div>
@@ -398,7 +330,7 @@
 
         <div class="pt-2">
           <button type="submit" class="w-full py-2.5 bg-amber-500 hover:bg-amber-400 text-slate-950 font-bold rounded-xl text-sm shadow-lg shadow-amber-500/25 transition">
-            Mulai Touring di Chrome
+            Simpan Data & Masuk Rombongan
           </button>
         </div>
       </form>
@@ -594,6 +526,6 @@
   <!-- Audio element for chime notification -->
   <audio id="alertAudio" src="https://assets.mixkit.co/active_storage/sfx/2869/2869-preview.mp3" preload="auto"></audio>
 
-  <script src="app.js?v=2.6"></script>
+  <script src="app.js?v=2.8"></script>
 </body>
 </html>
