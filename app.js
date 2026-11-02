@@ -1577,6 +1577,12 @@ function initEventListeners() {
   let pttProcessor = null;
   let recordedPcmBuffers = [];
 
+  // Hands-Free Radio State Variables
+  let isRadioTalkingActive = false; // true = MERAH (ngomong terus), false = HIJAU (berhenti ngobrol)
+  let radioCountdownTimer = null;
+  let radioSecondsRemaining = 600; // 10 menit = 600 detik
+  const RADIO_CYCLE_SECONDS = 600;
+
   let voxAudioContext = null;
   let voxAnalyser = null;
   let voxSource = null;
@@ -1950,10 +1956,6 @@ function initEventListeners() {
     }
   }
 
-  let radioCountdownTimer = null;
-  let radioSecondsRemaining = 600; // 10 menit = 600 detik
-  const RADIO_CYCLE_SECONDS = 600;
-  let isRadioTalkingActive = false; // true = MERAH (ngomong terus), false = HIJAU (berhenti ngobrol)
 
   function updateRadioTimerUI() {
     const badge = document.getElementById('radioTimerBadge');
