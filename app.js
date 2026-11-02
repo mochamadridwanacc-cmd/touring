@@ -298,6 +298,13 @@ function initCloudMqtt() {
         } else if (topic.endsWith('/voice')) {
           console.log('[MQTT Voice] Inbound audio message from:', msg.senderName, 'isSelf:', isSelf);
           if (msg && msg.audio && !isSelf) {
+            // A new rider gets the broker's retained latest voice chunk; ignore it once stale.
+            const voiceTimestamp = Number(msg.timestamp) || 0;
+            const voiceAgeMs = Date.now() - voiceTimestamp;
+            if (!voiceTimestamp || voiceAgeMs > 30000 || voiceAgeMs < -5000) {
+              console.log('[MQTT Voice] Ignored stale retained transmission');
+              return;
+            }
             const sizeKB = Math.round(msg.audio.length * 0.75 / 1024);
             if (appendChatFn) {
               appendChatFn({
@@ -2249,7 +2256,8 @@ function initEventListeners() {
     };
 
     console.log('[Voice] Broadcasting to', topicVoice, 'data length:', audioDataUrl.length);
-    state.mqttClient.publish(topicVoice, JSON.stringify(payload), { qos: 0 }, (err) => {
+    // Retain the latest short voice chunk so riders joining mid-conversation can catch up.
+    state.mqttClient.publish(topicVoice, JSON.stringify(payload), { qos: 0, retain: true }, (err) => {
       if (err) {
         console.error('[Voice] Publish error:', err);
         showPttToast('⚠️ Gagal Kirim Suara');
