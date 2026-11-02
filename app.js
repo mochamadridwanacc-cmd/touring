@@ -26,7 +26,8 @@ const state = {
   mqttBrokerName: '',
   hasFirstGpsLock: false,
   isAutoFollowMap: true,
-  lastPingRtt: null
+  lastPingRtt: null,
+  isAlertNotificationMuted: localStorage.getItem('touring_alert_muted') !== 'false' // Default true (Senyap)
 };
 
 // Preset Convoy Members (Dummies initialized by Master if needed)
@@ -418,11 +419,23 @@ function switchCloudRoom(newRoomCode) {
 
 function refreshCloudConvoy() {
   const now = Date.now();
-  // Filter out riders inactive for > 90 seconds (unless marked isDummy)
   const validRiders = [];
+
+  // Hitung status detak jantung (Smart Presence 3 Warna)
   Object.keys(state.activeCloudRiders).forEach(id => {
     const r = state.activeCloudRiders[id];
-    if (r.isDummy || (now - (r.lastSeen || now)) < 90000) {
+    const diff = now - (r.lastSeen || now);
+
+    // Pertahankan rider di memori hingga 10 menit (600.000 ms) agar titik terakhir tetap tersimpan di peta
+    if (r.isDummy || diff < 600000) {
+      if (diff > 30000) {
+        r.presenceStatus = 'OFFLINE'; // > 30 detik: Merah
+      } else if (diff > 10000) {
+        r.presenceStatus = 'WEAK';    // 10 - 30 detik: Kuning
+      } else {
+        r.presenceStatus = 'ONLINE';  // < 10 detik: Hijau Live
+      }
+      r.lastSeenDiffSec = Math.round(diff / 1000);
       validRiders.push(r);
     } else {
       delete state.activeCloudRiders[id];
@@ -438,9 +451,16 @@ function refreshCloudConvoy() {
   if (syncInd) {
     const count = state.riders.length + 1;
     const pingText = state.lastPingRtt !== null ? ` • ${state.lastPingRtt}ms` : '';
-    syncInd.innerHTML = `<span class="w-1.5 h-1.5 rounded-full bg-emerald-500 animate-pulse"></span> Cloud Live (${count} Rider${pingText})`;
+    syncInd.innerHTML = `<span class="w-1.5 h-1.5 rounded-full bg-emerald-500 animate-pulse"></span> Live (${count} Rider${pingText})`;
   }
 }
+
+// Timer otomatis untuk memperbarui status dot online/kuning/merah tiap 3 detik
+setInterval(() => {
+  if (Object.keys(state.activeCloudRiders).length > 0) {
+    refreshCloudConvoy();
+  }
+}, 3000);
 
 // Routing & URL Management: https://.../touring/3431/
 function updateBrowserUrlWithRoom(roomCode) {
@@ -844,9 +864,14 @@ function updateMapMarkers() {
     const roleClass = rider.role === 'LEADER' ? 'marker-leader' : (rider.role === 'SWEEPER' ? 'marker-sweeper' : 'marker-member');
     const roleTag = rider.role === 'LEADER' ? 'RC' : (rider.role === 'SWEEPER' ? 'SW' : 'R');
 
+    const isOffline = rider.presenceStatus === 'OFFLINE';
+    const popupText = isOffline
+      ? `<b>${rider.name} (OFFLINE)</b><br>Titik Terakhir Terpantau<br>Plat: ${rider.plate}`
+      : `<b>${rider.name} (LIVE)</b><br>${rider.vehicle}<br>Plat: ${rider.plate}`;
+
     if (!state.mapMarkers[rider.id]) {
       const riderIcon = L.divIcon({
-        className: `custom-rider-marker ${roleClass}`,
+        className: `custom-rider-marker ${roleClass} ${isOffline ? 'opacity-60' : ''}`,
         html: `
           <div class="marker-pin"><span class="marker-pin-inner">${roleTag}</span></div>
           <div class="marker-label">${rider.plate}</div>
@@ -854,11 +879,13 @@ function updateMapMarkers() {
         iconSize: [40, 50],
         iconAnchor: [20, 50]
       });
-      state.mapMarkers[rider.id] = L.marker(riderPos, { icon: riderIcon })
-        .bindPopup(`<b>${rider.name}</b><br>${rider.vehicle}<br>Plat: ${rider.plate}`)
+      state.mapMarkers[rider.id] = L.marker(riderPos, { icon: riderIcon, opacity: isOffline ? 0.65 : 1.0 })
+        .bindPopup(popupText)
         .addTo(state.map);
     } else {
       state.mapMarkers[rider.id].setLatLng(riderPos);
+      state.mapMarkers[rider.id].setOpacity(isOffline ? 0.65 : 1.0);
+      state.mapMarkers[rider.id].setPopupContent(popupText);
     }
   });
 
@@ -1109,7 +1136,7 @@ function renderLeftHUD(processedRiders) {
 
   leftContainer.innerHTML = '';
 
-  // 1. Baris Pengguna Sendiri (Saya) di Paling Atas
+  // 1. Baris Pengguna Sendiri (Saya) di Paling Atas (Transparan & Rapi)
   const myName = state.myProfile?.name || 'Saya';
   const myPlate = state.myProfile?.plate || 'MY-GPS';
   const myRole = state.myProfile?.role || 'MEMBER';
@@ -1123,15 +1150,15 @@ function renderLeftHUD(processedRiders) {
         : 'bg-emerald-500/20 text-emerald-300 border border-emerald-500/40'));
 
   const selfEl = document.createElement('div');
-  selfEl.className = 'cursor-pointer flex items-center justify-between px-2.5 py-1.5 rounded-xl bg-slate-950/45 hover:bg-slate-900/70 backdrop-blur-md border border-emerald-500/40 text-slate-100 shadow-sm transition active:scale-[0.98] group';
+  selfEl.className = 'cursor-pointer flex items-center justify-between px-2 py-1 rounded-lg bg-black/20 hover:bg-black/40 backdrop-blur-[2px] text-slate-100 transition active:scale-[0.98] group [text-shadow:_0_1px_3px_rgb(0_0_0_/_90%)]';
   selfEl.title = 'Klik untuk pusatkan peta ke posisi Saya';
   selfEl.innerHTML = `
     <div class="flex items-center gap-1.5 min-w-0 pr-1">
-      <span class="w-2 h-2 rounded-full bg-emerald-400 animate-pulse flex-shrink-0"></span>
+      <span class="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse flex-shrink-0"></span>
       <span class="px-1 py-0.2 rounded text-[9px] font-bold ${myRoleColor}">${myRoleTag}</span>
-      <span class="font-bold text-xs truncate text-white group-hover:text-amber-300 transition">${myName} <span class="text-[10px] text-emerald-400/90 font-normal">(Saya)</span></span>
+      <span class="font-bold text-xs truncate text-white/95 group-hover:text-amber-300 transition">${myName} <span class="text-[10px] text-emerald-400/90 font-normal">(Saya)</span></span>
     </div>
-    <span class="font-mono text-[10px] text-slate-300 font-semibold flex-shrink-0">${myPlate}</span>
+    <span class="font-mono text-[10px] text-slate-300/85 font-semibold flex-shrink-0">${myPlate}</span>
   `;
   selfEl.addEventListener('click', () => {
     if (state.map) {
@@ -1141,10 +1168,10 @@ function renderLeftHUD(processedRiders) {
   });
   leftContainer.appendChild(selfEl);
 
-  // 2. Baris Anggota Rombongan Lainnya
+  // 2. Baris Anggota Rombongan Lainnya (Transparan & Rapi)
   if (processedRiders.length === 0) {
     const emptyNotice = document.createElement('div');
-    emptyNotice.className = 'px-2 py-1 text-[10px] text-slate-400/70 italic';
+    emptyNotice.className = 'px-1.5 py-0.5 text-[10px] text-slate-300/70 italic [text-shadow:_0_1px_2px_rgb(0_0_0_/_90%)]';
     emptyNotice.textContent = 'Menunggu rider lain...';
     leftContainer.appendChild(emptyNotice);
     return;
@@ -1159,18 +1186,40 @@ function renderLeftHUD(processedRiders) {
         ? 'bg-rose-500/25 text-rose-300 border border-rose-500/40' 
         : (rRole === 'MEDIC' 
           ? 'bg-red-500/25 text-red-300 border border-red-500/40' 
-          : 'bg-slate-800/80 text-slate-300 border border-slate-700/50'));
+          : 'bg-slate-800/60 text-slate-300 border border-slate-700/40'));
+
+    const isOffline = rider.presenceStatus === 'OFFLINE';
+    const isWeak = rider.presenceStatus === 'WEAK';
+
+    let dotClass = 'bg-emerald-400 animate-pulse';
+    let textClass = 'text-slate-200/95 group-hover:text-amber-300';
+    let subInfo = formatDistance(rider.distance);
+    let subClass = 'text-amber-300/90 font-bold';
+
+    if (isOffline) {
+      dotClass = 'bg-rose-500';
+      textClass = 'line-through decoration-rose-500/60 text-rose-300/80';
+      const mins = Math.max(1, Math.round((rider.lastSeenDiffSec || 30) / 60));
+      subInfo = `${mins}m lalu`;
+      subClass = 'text-rose-400 font-bold';
+    } else if (isWeak) {
+      dotClass = 'bg-amber-400 animate-pulse';
+      textClass = 'text-amber-200/95 group-hover:text-amber-300';
+      subInfo = `${rider.lastSeenDiffSec || 15}s lalu`;
+      subClass = 'text-amber-400 font-bold';
+    }
 
     const row = document.createElement('div');
-    row.className = 'cursor-pointer flex items-center justify-between px-2.5 py-1.5 rounded-xl bg-slate-950/35 hover:bg-slate-900/65 backdrop-blur-md border border-white/5 hover:border-slate-700/60 text-slate-200 shadow-sm transition active:scale-[0.98] group';
-    row.title = `Klik untuk lihat posisi ${rider.name} (${rider.plate}) di peta`;
+    row.className = `cursor-pointer flex items-center justify-between px-2 py-1 rounded-lg ${isOffline ? 'bg-rose-950/20' : 'bg-black/15'} hover:bg-black/35 backdrop-blur-[2px] text-slate-200 transition active:scale-[0.98] group [text-shadow:_0_1px_3px_rgb(0_0_0_/_90%)]`;
+    row.title = `Klik untuk lihat posisi ${rider.name} (${rider.plate}) di peta ${isOffline ? '(Titik Terakhir Terpantau)' : ''}`;
     row.innerHTML = `
       <div class="flex items-center gap-1.5 min-w-0 pr-1">
+        <span class="w-1.5 h-1.5 rounded-full ${dotClass} flex-shrink-0"></span>
         <span class="px-1 py-0.2 rounded text-[9px] font-bold ${rRoleColor}">${rRoleTag}</span>
-        <span class="font-medium text-xs truncate text-slate-200 group-hover:text-amber-300 transition">${rider.name}</span>
+        <span class="font-medium text-xs truncate ${textClass} transition">${rider.name}</span>
       </div>
       <div class="flex items-center gap-1 flex-shrink-0">
-        <span class="font-mono text-[10px] text-amber-300/95 font-bold">${formatDistance(rider.distance)}</span>
+        <span class="font-mono text-[10px] ${subClass}">${subInfo}</span>
       </div>
     `;
     row.addEventListener('click', () => {
@@ -1297,7 +1346,7 @@ function initEventListeners() {
 
 
 
-  // Voice mute/unmute
+  // Voice mute/unmute (Interkom Suara Teman)
   const voiceBtn = document.getElementById('btnVoiceToggle');
   voiceBtn?.addEventListener('click', () => {
     state.isVoiceActive = !state.isVoiceActive;
@@ -1306,6 +1355,29 @@ function initEventListeners() {
       : '<i data-lucide="volume-x" class="w-4 h-4 text-slate-500"></i>';
     if (window.lucide) lucide.createIcons();
   });
+
+  // Alert Notification Mute Toggle (Lonceng Senyap / Bunyi)
+  function updateAlertNotificationUI() {
+    const btn = document.getElementById('btnToggleAlertNotification');
+    if (!btn) return;
+    if (state.isAlertNotificationMuted) {
+      btn.className = 'flex items-center gap-1 px-1.5 py-0.5 rounded-lg text-[10px] bg-slate-900/60 hover:bg-slate-800 text-slate-400 border border-slate-700/50 transition cursor-pointer';
+      btn.title = 'Notifikasi Senyap (Klik untuk Nyalakan Bunyi)';
+      btn.innerHTML = '<i data-lucide="bell-off" class="w-3 h-3 text-slate-400"></i> <span class="text-[9px]">Senyap</span>';
+    } else {
+      btn.className = 'flex items-center gap-1 px-1.5 py-0.5 rounded-lg text-[10px] bg-amber-500/20 hover:bg-amber-500/30 text-amber-300 border border-amber-500/40 transition cursor-pointer font-bold';
+      btn.title = 'Notifikasi Bunyi Aktif (Klik untuk Matikan Suara)';
+      btn.innerHTML = '<i data-lucide="bell" class="w-3 h-3 text-amber-300"></i> <span class="text-[9px]">Bunyi</span>';
+    }
+    if (window.lucide) lucide.createIcons();
+  }
+
+  document.getElementById('btnToggleAlertNotification')?.addEventListener('click', () => {
+    state.isAlertNotificationMuted = !state.isAlertNotificationMuted;
+    localStorage.setItem('touring_alert_muted', state.isAlertNotificationMuted ? 'true' : 'false');
+    updateAlertNotificationUI();
+  });
+  updateAlertNotificationUI();
 
   // Simulation Button
   document.getElementById('btnSimulationToggle')?.addEventListener('click', toggleSimulation);
@@ -1576,6 +1648,11 @@ function initEventListeners() {
 
     // Stop previous modes
     clearInterval(alwaysOnInterval);
+    if (typeof radioCountdownTimer !== 'undefined' && radioCountdownTimer) {
+      clearInterval(radioCountdownTimer);
+      radioCountdownTimer = null;
+    }
+    if (typeof updateRadioTimerUI === 'function') updateRadioTimerUI();
     if (isRecordingPtt) stopPttRecording();
 
     if (state.micMode === 'ALWAYS_ON') {
@@ -1598,12 +1675,12 @@ function initEventListeners() {
       return;
     }
 
-    if (isRecordingPtt) {
+    if (isRecordingPtt && state.micMode === 'PTT') {
       pttBtn.className = 'w-16 h-16 rounded-full bg-rose-600 border-4 border-rose-300 text-white shadow-2xl flex flex-col items-center justify-center transition-all transform scale-110 select-none animate-pulse';
       pttLabel.textContent = 'REC...';
     } else if (state.micMode === 'ALWAYS_ON') {
       pttBtn.className = 'w-16 h-16 rounded-full bg-emerald-600 border-2 border-emerald-300 text-white shadow-2xl flex flex-col items-center justify-center transition-all select-none animate-pulse';
-      pttLabel.textContent = 'OPEN MIC';
+      pttLabel.textContent = 'RADIO';
     } else if (state.micMode === 'VOX') {
       pttBtn.className = 'w-16 h-16 rounded-full bg-cyan-950/90 border-2 border-cyan-400 text-cyan-300 shadow-2xl flex flex-col items-center justify-center transition-all select-none';
       pttLabel.textContent = 'VOX AUTO';
@@ -1612,6 +1689,7 @@ function initEventListeners() {
       pttBtn.className = 'w-16 h-16 rounded-full bg-slate-900/95 hover:bg-slate-800 border-2 border-emerald-500/80 text-emerald-400 shadow-2xl flex flex-col items-center justify-center transition-all transform active:scale-95 group focus:outline-none select-none';
       pttLabel.textContent = 'PTT';
     }
+    if (typeof updateRadioTimerUI === 'function') updateRadioTimerUI();
   }
 
   let pttToastTimer = null;
@@ -1835,7 +1913,26 @@ function initEventListeners() {
     }
   }
 
-  // Always On Mode: continuous streaming chunks of 2.5 seconds
+  let radioCountdownTimer = null;
+  let radioSecondsRemaining = 600; // 10 menit = 600 detik
+  const RADIO_CYCLE_SECONDS = 600;
+
+  function updateRadioTimerUI() {
+    const badge = document.getElementById('radioTimerBadge');
+    const display = document.getElementById('countdownDisplay');
+    if (!badge || !display) return;
+
+    if (state.micMode === 'ALWAYS_ON') {
+      badge.classList.remove('hidden');
+      const m = Math.floor(radioSecondsRemaining / 60);
+      const s = radioSecondsRemaining % 60;
+      display.textContent = `${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')}`;
+    } else {
+      badge.classList.add('hidden');
+    }
+  }
+
+  // Radio Hands-Free Mode: continuous streaming with auto-reset & auto-reopen every 10 minutes
   function startAlwaysOnMode() {
     if (state.isMutedByHost) return;
     startPttRecording();
@@ -1845,6 +1942,38 @@ function initEventListeners() {
         flushPcmChunksAndBroadcast();
       }
     }, 2500);
+
+    // Mulai hitung mundur 10 menit (Auto-reset per 10 menit & auto reopen)
+    if (radioCountdownTimer) clearInterval(radioCountdownTimer);
+    radioSecondsRemaining = RADIO_CYCLE_SECONDS;
+    updateRadioTimerUI();
+
+    radioCountdownTimer = setInterval(() => {
+      if (state.micMode !== 'ALWAYS_ON') {
+        clearInterval(radioCountdownTimer);
+        radioCountdownTimer = null;
+        updateRadioTimerUI();
+        return;
+      }
+
+      radioSecondsRemaining--;
+      updateRadioTimerUI();
+
+      if (radioSecondsRemaining <= 0) {
+        // Auto-reset buffer audio & auto-reopen immediately!
+        console.log('[Radio Hands-Free] 10 menit tercapai. Mereset buffer & membuka otomatis kembali...');
+        showPttToast('♻️ Audio Reset 10m', 1500);
+
+        stopPttRecording();
+        setTimeout(() => {
+          radioSecondsRemaining = RADIO_CYCLE_SECONDS;
+          if (state.micMode === 'ALWAYS_ON' && !state.isMutedByHost) {
+            startPttRecording();
+            console.log('[Radio Hands-Free] Berhasil terbuka otomatis kembali untuk 10 menit berikutnya!');
+          }
+        }, 150);
+      }
+    }, 1000);
   }
 
   // Core Audio Recording using Web Audio ScriptProcessorNode (Cross-browser compatible iOS + Android + Desktop)
@@ -2318,10 +2447,12 @@ function initEventListeners() {
     msgEl.textContent = text;
     toast.classList.remove('hidden');
 
-    const audioEl = document.getElementById('alertAudio');
-    if (audioEl) {
-      audioEl.currentTime = 0;
-      audioEl.play().catch(() => {});
+    if (!state.isAlertNotificationMuted) {
+      const audioEl = document.getElementById('alertAudio');
+      if (audioEl) {
+        audioEl.currentTime = 0;
+        audioEl.play().catch(() => {});
+      }
     }
 
     setTimeout(() => {
@@ -2490,6 +2621,16 @@ function initEventListeners() {
   document.getElementById('btnOpenChatLogFloating')?.addEventListener('click', openChatModal);
   document.getElementById('btnCloseChatLog')?.addEventListener('click', () => {
     if (chatModal) chatModal.classList.add('hidden');
+  });
+
+  // Tap sembarang di luar modal (backdrop) untuk langsung menutup
+  ['chatLogModal', 'profileModal', 'qrModal', 'micSettingsModal'].forEach(modalId => {
+    const el = document.getElementById(modalId);
+    el?.addEventListener('click', (e) => {
+      if (e.target === el) {
+        el.classList.add('hidden');
+      }
+    });
   });
 
   document.getElementById('chatForm')?.addEventListener('submit', (e) => {
