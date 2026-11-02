@@ -72,15 +72,14 @@ document.addEventListener('DOMContentLoaded', async () => {
     lucide.createIcons();
   }
 
-  loadProfile();
-  initMap();
-  updateMapMarkers();
-  renderRoster();
-  initGeolocation();
-  initWakeLock();
-  initEventListeners();
-  initVoiceIntercom();
-  initAudioContextUnlock();
+  try { loadProfile(); } catch (e) { console.error('Error in loadProfile:', e); }
+  try { initMap(); } catch (e) { console.error('Error in initMap:', e); }
+  try { updateMapMarkers(); } catch (e) { console.error('Error in updateMapMarkers:', e); }
+  try { renderRoster(); } catch (e) { console.error('Error in renderRoster:', e); }
+  try { initGeolocation(); } catch (e) { console.error('Error in initGeolocation:', e); }
+  try { initWakeLock(); } catch (e) { console.error('Error in initWakeLock:', e); }
+  try { initEventListeners(); } catch (e) { console.error('Error in initEventListeners:', e); }
+  try { initAudioContextUnlock(); } catch (e) { console.error('Error in initAudioContextUnlock:', e); }
 
   // Check for HTTPS on mobile devices
   if (location.protocol !== 'https:' && location.hostname !== 'localhost' && location.hostname !== '127.0.0.1') {
@@ -1136,7 +1135,7 @@ function toggleSimulation() {
    ========================================================================== */
 function initEventListeners() {
   // Recenter map button
-  document.getElementById('btnRecenter').addEventListener('click', () => {
+  document.getElementById('btnRecenter')?.addEventListener('click', () => {
     state.isAutoFollowMap = true;
     if (state.map) {
       state.map.setView([state.myCoords.lat, state.myCoords.lng], 17, { animate: true });
@@ -1145,11 +1144,13 @@ function initEventListeners() {
 
   // Drawer toggles
   const drawer = document.getElementById('rosterDrawer');
-  document.getElementById('btnToggleRoster').addEventListener('click', () => {
-    drawer.classList.remove('translate-x-full');
+  document.getElementById('btnToggleRoster')?.addEventListener('click', () => {
+    drawer?.classList.remove('translate-x-full', 'pointer-events-none');
+    drawer?.classList.add('pointer-events-auto');
   });
-  document.getElementById('btnCloseRoster').addEventListener('click', () => {
-    drawer.classList.add('translate-x-full');
+  document.getElementById('btnCloseRoster')?.addEventListener('click', () => {
+    drawer?.classList.add('translate-x-full', 'pointer-events-none');
+    drawer?.classList.remove('pointer-events-auto');
   });
 
   // Zoom In (+) and Zoom Out (-) buttons (Persis di bawah tombol PTT)
@@ -1160,16 +1161,11 @@ function initEventListeners() {
     if (state.map) state.map.zoomOut();
   });
 
-  // Floating Chat Button (Kanan Bawah)
-  document.getElementById('btnOpenChatLogFloating')?.addEventListener('click', () => {
-    document.getElementById('chatLogModal')?.classList.remove('hidden');
-    state.unreadChatCount = 0;
-    if (typeof updateUnreadBadges === 'function') updateUnreadBadges();
-  });
+
 
   // Voice mute/unmute
   const voiceBtn = document.getElementById('btnVoiceToggle');
-  voiceBtn.addEventListener('click', () => {
+  voiceBtn?.addEventListener('click', () => {
     state.isVoiceActive = !state.isVoiceActive;
     voiceBtn.innerHTML = state.isVoiceActive
       ? '<i data-lucide="volume-2" class="w-4 h-4 text-emerald-400"></i>'
@@ -1178,7 +1174,7 @@ function initEventListeners() {
   });
 
   // Simulation Button
-  document.getElementById('btnSimulationToggle').addEventListener('click', toggleSimulation);
+  document.getElementById('btnSimulationToggle')?.addEventListener('click', toggleSimulation);
 
   // Profile Modal & Form
   const modal = document.getElementById('profileModal');
@@ -1198,11 +1194,11 @@ function initEventListeners() {
     }
     modal.classList.remove('hidden');
   };
-  document.getElementById('btnOpenEditProfile').addEventListener('click', openModal);
+  document.getElementById('btnOpenEditProfile')?.addEventListener('click', openModal);
   document.getElementById('btnHeaderProfile')?.addEventListener('click', openModal);
-  document.getElementById('btnCloseModal').addEventListener('click', () => modal.classList.add('hidden'));
+  document.getElementById('btnCloseModal')?.addEventListener('click', () => modal?.classList.add('hidden'));
 
-  document.getElementById('profileForm').addEventListener('submit', (e) => {
+  document.getElementById('profileForm')?.addEventListener('submit', (e) => {
     e.preventDefault();
     const isMasterSelected = document.getElementById('modeMaster') ? document.getElementById('modeMaster').checked : false;
     const roomInput = document.getElementById('inputRoomCode');
@@ -1223,13 +1219,13 @@ function initEventListeners() {
     };
     saveProfile(profile);
     modal.classList.add('hidden');
-    document.getElementById('btnCloseModal').classList.remove('hidden');
+    document.getElementById('btnCloseModal')?.classList.remove('hidden');
     updateMapMarkers();
     renderRoster();
   });
 
   // Add custom rider button
-  document.getElementById('btnAddNewRider').addEventListener('click', () => {
+  document.getElementById('btnAddNewRider')?.addEventListener('click', () => {
     const name = prompt('Nama Rider:');
     if (!name) return;
     const plate = prompt('Nomor Plat (Contoh: B 1234 ABC):');
@@ -1261,7 +1257,7 @@ function initEventListeners() {
     { name: 'Dokter Arya (Medis)', plate: 'B 1199 MED', vehicle: 'Toyota Hilux Rescue', role: 'MEDIC', offsetDist: -150 }
   ];
 
-  document.getElementById('btnGenerateDummy').addEventListener('click', () => {
+  document.getElementById('btnGenerateDummy')?.addEventListener('click', () => {
     const newDummies = [];
     DUMMY_POOL.forEach((item, idx) => {
       const latOffset = (item.offsetDist / 111000);
@@ -1285,20 +1281,20 @@ function initEventListeners() {
   });
 
   // Reset Convoy to default
-  document.getElementById('btnResetConvoy').addEventListener('click', () => {
+  document.getElementById('btnResetConvoy')?.addEventListener('click', () => {
     syncWithServer('set_convoy', { convoyList: DEFAULT_CONVOY });
     alert('Rombongan telah di-reset ke rombongan standar.');
   });
 
   // Clear all dummy riders (Kosongkan Rombongan)
-  document.getElementById('btnClearAllRiders').addEventListener('click', () => {
+  document.getElementById('btnClearAllRiders')?.addEventListener('click', () => {
     if (confirm('Yakin ingin membersihkan semua peserta dummy? Hanya HP/Laptop asli yang akan tersisa.')) {
       syncWithServer('clear');
     }
   });
 
   // Delete Individual Rider
-  document.getElementById('riderListContainer').addEventListener('click', (e) => {
+  document.getElementById('riderListContainer')?.addEventListener('click', (e) => {
     const delBtn = e.target.closest('.btn-delete-rider');
     if (delBtn) {
       const riderId = delBtn.dataset.id;
@@ -1342,13 +1338,13 @@ function initEventListeners() {
     if (window.lucide) lucide.createIcons();
   }
 
-  document.getElementById('btnOpenQrModal').addEventListener('click', openQrModal);
-  document.getElementById('btnCloseQrModal').addEventListener('click', () => {
-    qrModal.classList.add('hidden');
+  document.getElementById('btnOpenQrModal')?.addEventListener('click', openQrModal);
+  document.getElementById('btnCloseQrModal')?.addEventListener('click', () => {
+    qrModal?.classList.add('hidden');
   });
 
   // Copy Link button
-  document.getElementById('btnCopyShareUrl').addEventListener('click', () => {
+  document.getElementById('btnCopyShareUrl')?.addEventListener('click', () => {
     navigator.clipboard.writeText(shareInput.value).then(() => {
       const btn = document.getElementById('btnCopyShareUrl');
       const originalHTML = btn.innerHTML;
@@ -1411,12 +1407,12 @@ function initEventListeners() {
 
   // Modal open/close
   const micModal = document.getElementById('micSettingsModal');
-  document.getElementById('btnOpenMicModal').addEventListener('click', () => {
-    micModal.classList.remove('hidden');
+  document.getElementById('btnOpenMicModal')?.addEventListener('click', () => {
+    micModal?.classList.remove('hidden');
     startVoxEngine(); // Start audio context for live meter preview
   });
-  document.getElementById('btnCloseMicModal').addEventListener('click', () => {
-    micModal.classList.add('hidden');
+  document.getElementById('btnCloseMicModal')?.addEventListener('click', () => {
+    micModal?.classList.add('hidden');
   });
 
   // Slider change
@@ -1433,10 +1429,10 @@ function initEventListeners() {
   }
 
   // Save Mic Settings button
-  document.getElementById('btnSaveMicSettings').addEventListener('click', () => {
+  document.getElementById('btnSaveMicSettings')?.addEventListener('click', () => {
     const selectedMode = document.querySelector('input[name="micModeRadio"]:checked')?.value || 'PTT';
     setMicMode(selectedMode);
-    micModal.classList.add('hidden');
+    micModal?.classList.add('hidden');
   });
 
   function setMicMode(newMode) {
@@ -2079,7 +2075,7 @@ function initEventListeners() {
   }, { once: true, passive: true });
 
   // Host Mute Roster Events
-  document.getElementById('riderListContainer').addEventListener('click', (e) => {
+  document.getElementById('riderListContainer')?.addEventListener('click', (e) => {
     const muteBtn = e.target.closest('.btn-mute-rider');
     if (muteBtn) {
       const riderId = muteBtn.dataset.id;
