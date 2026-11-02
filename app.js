@@ -298,7 +298,9 @@ function initCloudMqtt() {
           }
         } else if (topic.endsWith('/voice')) {
           console.log('[MQTT Voice] Inbound audio message from:', msg.senderName, 'isSelf:', isSelf);
-          if (msg && msg.audio && !isSelf) {
+          // Different tabs can share one profile ID; only ignore the exact publishing tab.
+          const isSelfVoice = msg.senderClientId === state.mqttClientId;
+          if (msg && msg.audio && !isSelfVoice) {
             // A new rider gets the broker's retained latest voice chunk; ignore it once stale.
             const voiceTimestamp = Number(msg.timestamp) || 0;
             const voiceAgeMs = Date.now() - voiceTimestamp;
@@ -342,7 +344,7 @@ function initCloudMqtt() {
               } else {
                 console.log(`[MQTT Auto-Ping] Latency: ${rtt} ms`);
               }
-
+            }
           }
         } else if (topic.endsWith('/ctl')) {
           if (msg.action === 'delete') {
@@ -1236,6 +1238,7 @@ function renderLeftHUD(processedRiders) {
       <span class="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse flex-shrink-0"></span>
       <span class="px-1 py-0.2 rounded text-[9px] font-bold ${myRoleColor}">${myRoleTag}</span>
       <span class="font-bold text-xs truncate text-white/95 group-hover:text-amber-300 transition">${myName} <span class="text-[10px] text-emerald-400/90 font-normal">(Saya)</span></span>
+      ${(state.activeSpeakerUntil[state.myProfile?.id] || 0) > Date.now() ? '<span class="text-emerald-300 animate-pulse flex-shrink-0" title="Sedang bicara"><i data-lucide="volume-2" class="w-3.5 h-3.5"></i></span>' : ''}
     </div>
     <span class="font-mono text-[10px] text-slate-300/85 font-semibold flex-shrink-0">${myPlate}</span>
   `;
@@ -2322,8 +2325,6 @@ function initEventListeners() {
       if (ctx && ctx.state === 'suspended') {
         try { await ctx.resume(); } catch (e) {}
       }
-
-      if (ctx) playRadioChirp(ctx);
 
       const arrayBuffer = base64ToArrayBuffer(item.audioDataUrl);
       const playNext = () => setTimeout(processIncomingVoiceQueue, 80);
