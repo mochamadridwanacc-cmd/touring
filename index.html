@@ -156,6 +156,12 @@
         <span id="pttLabel" class="text-[9px] font-bold tracking-wider uppercase mt-0.5 font-mono text-slate-300">PTT</span>
       </button>
 
+      <!-- 1-Tap Quick Mode Switcher Pill (Langsung Ganti PTT <-> HANDS-FREE di Layar) -->
+      <button id="btnQuickToggleHandsfree" class="px-2 py-0.5 rounded-full bg-slate-900/90 border border-slate-700/60 text-[10px] font-mono font-bold text-slate-300 hover:text-amber-400 shadow-md backdrop-blur-md transition flex items-center gap-1 active:scale-95" title="Klik untuk Ganti Mode PTT / Hands-Free Langsung">
+        <span id="quickModeDot" class="w-1.5 h-1.5 rounded-full bg-slate-400"></span>
+        <span id="quickModeText">PTT</span>
+      </button>
+
       <!-- Radio Timer Badge (muncul saat Mode Radio Hands-Free Aktif) -->
       <div id="radioTimerBadge" class="hidden px-2 py-0.5 rounded-full bg-emerald-500/20 border border-emerald-500/40 text-emerald-400 text-[10px] font-mono font-bold flex items-center gap-1 shadow-md">
         <span class="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-ping"></span>
@@ -541,6 +547,6 @@
   <!-- Audio element for chime notification -->
   <audio id="alertAudio" src="https://assets.mixkit.co/active_storage/sfx/2869/2869-preview.mp3" preload="auto"></audio>
 
-  <script src="app.js?v=3.1"></script>
+  <script src="app.js?v=3.2"></script>
 </body>
 </html>

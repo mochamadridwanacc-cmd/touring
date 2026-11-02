@@ -1611,6 +1611,7 @@ function initEventListeners() {
   }
 
   updatePttButtonUI();
+  updateQuickModeUI();
 
   // Modal open/close
   const micModal = document.getElementById('micSettingsModal');
@@ -1642,9 +1643,40 @@ function initEventListeners() {
     micModal?.classList.add('hidden');
   });
 
+  // 1-Tap Quick Switcher directly on HUD
+  document.getElementById('btnQuickToggleHandsfree')?.addEventListener('click', (e) => {
+    e.preventDefault();
+    const nextMode = state.micMode === 'ALWAYS_ON' ? 'PTT' : 'ALWAYS_ON';
+    setMicMode(nextMode);
+    showPttToast(nextMode === 'ALWAYS_ON' ? '📻 Mode Hands-Free (Radio) Aktif' : '🔘 Mode PTT Aktif', 2000);
+  });
+
+  function updateQuickModeUI() {
+    const btn = document.getElementById('btnQuickToggleHandsfree');
+    const dot = document.getElementById('quickModeDot');
+    const text = document.getElementById('quickModeText');
+    if (!btn || !dot || !text) return;
+
+    if (state.micMode === 'ALWAYS_ON') {
+      btn.className = 'px-2 py-0.5 rounded-full bg-emerald-950/80 border border-emerald-500/60 text-[10px] font-mono font-bold text-emerald-300 shadow-md backdrop-blur-md transition flex items-center gap-1 active:scale-95';
+      dot.className = 'w-1.5 h-1.5 rounded-full bg-emerald-400 animate-ping';
+      text.textContent = '📻 HANDS-FREE';
+      btn.title = 'Mode Hands-Free Aktif (Klik untuk Ganti ke PTT)';
+    } else {
+      btn.className = 'px-2 py-0.5 rounded-full bg-slate-900/90 border border-slate-700/60 text-[10px] font-mono font-bold text-slate-300 hover:text-amber-400 shadow-md backdrop-blur-md transition flex items-center gap-1 active:scale-95';
+      dot.className = 'w-1.5 h-1.5 rounded-full bg-slate-400';
+      text.textContent = '🔘 PTT';
+      btn.title = 'Mode PTT Aktif (Klik untuk Ganti ke Hands-Free)';
+    }
+  }
+
   function setMicMode(newMode) {
     state.micMode = newMode;
     localStorage.setItem('touring_mic_mode', newMode);
+
+    // Sync radio in modal
+    const radioEl = document.getElementById('micMode' + (newMode === 'ALWAYS_ON' ? 'AlwaysOn' : (newMode === 'VOX' ? 'Vox' : 'Ptt')));
+    if (radioEl) radioEl.checked = true;
 
     // Stop previous modes
     clearInterval(alwaysOnInterval);
@@ -1662,6 +1694,7 @@ function initEventListeners() {
     }
 
     updatePttButtonUI();
+    updateQuickModeUI();
   }
 
   function updatePttButtonUI() {
@@ -1679,14 +1712,14 @@ function initEventListeners() {
       pttBtn.className = 'w-16 h-16 rounded-full bg-rose-600 border-4 border-rose-300 text-white shadow-2xl flex flex-col items-center justify-center transition-all transform scale-110 select-none animate-pulse';
       pttLabel.textContent = 'REC...';
     } else if (state.micMode === 'ALWAYS_ON') {
-      if (typeof isRadioTalkingActive !== 'undefined' && isRadioTalkingActive) {
+      if (typeof isRadioTalkingActive !== 'undefined' && isRadioTalkingActive && isRecordingPtt) {
         // MERAH: Tanda Ngomong Terus
         pttBtn.className = 'w-16 h-16 rounded-full bg-rose-600 border-4 border-rose-300 text-white shadow-2xl flex flex-col items-center justify-center transition-all animate-pulse transform scale-105 select-none';
         pttBtn.title = 'Sedang Bicara Terus (Klik untuk Berhenti Ngobrol)';
         pttLabel.textContent = 'TALK 🔴';
       } else {
         // HIJAU: Tanda Berhenti Ngobrol (Standby)
-        pttBtn.className = 'w-16 h-16 rounded-full bg-slate-900/95 hover:bg-slate-800 border-2 border-emerald-500 text-emerald-400 shadow-xl flex flex-col items-center justify-center transition-all select-none';
+        pttBtn.className = 'w-16 h-16 rounded-full bg-emerald-950/90 hover:bg-emerald-900/90 border-2 border-emerald-400 text-emerald-300 shadow-xl flex flex-col items-center justify-center transition-all select-none';
         pttBtn.title = 'Mode Radio Standby (Klik Sekali untuk Ngomong Terus)';
         pttLabel.textContent = 'RADIO 🟢';
       }
@@ -1699,6 +1732,7 @@ function initEventListeners() {
       pttLabel.textContent = 'PTT';
     }
     if (typeof updateRadioTimerUI === 'function') updateRadioTimerUI();
+    if (typeof updateQuickModeUI === 'function') updateQuickModeUI();
   }
 
   let pttToastTimer = null;
@@ -2061,6 +2095,7 @@ function initEventListeners() {
     } catch (err) {
       console.warn('Microphone access denied:', err);
       isRecordingPtt = false;
+      isRadioTalkingActive = false;
       updatePttButtonUI();
       showPttToast('⚠️ Mic Ditolak');
       alert('Izin mikrofon diperlukan untuk interkom suara.\nKlik "Izinkan / Allow" mikrofon di browser.');
@@ -2334,19 +2369,31 @@ function initEventListeners() {
     updatePttButtonUI();
   }
 
-  // PTT Button Event Listeners: Instant Push-to-Talk + Tap-to-Lock
+  // PTT Button Event Listeners: Instant Push-to-Talk + Tap-to-Lock + Hands-Free Toggle
   const pttButton = document.getElementById('btnPtt');
   let pttStartTime = 0;
   let pttIsLocked = false;
+  let lastTouchTime = 0;
 
   function handlePttStart(e) {
-    if (e) e.preventDefault();
+    if (e) {
+      if (e.type === 'touchstart') {
+        lastTouchTime = Date.now();
+      } else if (e.type === 'mousedown') {
+        // Cegah double event / ghost click pada HP layar sentuh (iOS Safari / Android)
+        if (Date.now() - lastTouchTime < 800) {
+          if (e.preventDefault) e.preventDefault();
+          return;
+        }
+      }
+      if (e.cancelable) e.preventDefault();
+    }
     unlockGlobalAudio();
     if (state.isMutedByHost) return;
 
     // Saat mode Hands-Free: klik sekali jadi merah tanda ngomong terus, klik lagi jadi hijau berhenti ngobrol
     if (state.micMode === 'ALWAYS_ON') {
-      if (isRadioTalkingActive || isRecordingPtt) {
+      if (isRadioTalkingActive) {
         stopRadioTalking();
       } else {
         startRadioTalking();
@@ -2366,7 +2413,18 @@ function initEventListeners() {
   }
 
   function handlePttEnd(e) {
-    if (e) e.preventDefault();
+    if (e) {
+      if (e.type === 'touchend') {
+        lastTouchTime = Date.now();
+      } else if (e.type === 'mouseup') {
+        // Cegah double event / ghost click pada HP layar sentuh
+        if (Date.now() - lastTouchTime < 800) {
+          if (e.preventDefault) e.preventDefault();
+          return;
+        }
+      }
+      if (e.cancelable) e.preventDefault();
+    }
     if (state.isMutedByHost || state.micMode === 'ALWAYS_ON') return;
 
     const duration = Date.now() - pttStartTime;
@@ -2390,7 +2448,15 @@ function initEventListeners() {
     pttButton.addEventListener('mousedown', handlePttStart);
     pttButton.addEventListener('mouseup', handlePttEnd);
 
+    // Cegah action klik bawaan browser
+    pttButton.addEventListener('click', (e) => {
+      e.preventDefault();
+    });
+
     pttButton.addEventListener('mouseleave', () => {
+      // PENTING: Pada mode Hands-Free, jangan matikan rekaman saat kursor/jari keluar area tombol!
+      if (state.micMode === 'ALWAYS_ON') return;
+
       if (isRecordingPtt && !pttIsLocked) {
         stopPttRecording();
       }
