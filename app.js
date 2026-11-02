@@ -336,11 +336,7 @@ function initCloudMqtt() {
               } else {
                 console.log(`[MQTT Auto-Ping] Latency: ${rtt} ms`);
               }
-            } else if (msg.senderClientId !== state.mqttClientId) {
-              if (showToastFn) {
-                showToastFn(msg.senderName || 'Rider', `⚡ Mengirim Ping Koneksi (${msg.senderName})!`);
-              }
-            }
+
           }
         } else if (topic.endsWith('/ctl')) {
           if (msg.action === 'delete') {
